@@ -46,7 +46,7 @@ export default function Home() {
   const [hasVoted, setHasVoted] = useState(false);
   const [settings, setSettings] = useState<GameSettings>({
     promptTime: 120,
-    votingTime: 40,
+    votingTime: 55,
   });
   const [isGenerating, setIsGenerating] = useState(false);
   const [joinGameId, setJoinGameId] = useState('');
@@ -175,7 +175,7 @@ export default function Home() {
     const initialState: GameState = {
       phase: 'lobby',
       players: {},
-      settings: { promptTime: 120, votingTime: 40 },
+      settings: { promptTime: 120, votingTime: 55 },
       timeRemaining: 0,
       startTime: Date.now(),
     };
