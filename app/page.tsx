@@ -421,6 +421,20 @@ export default function Home() {
     setRatedPlayers(new Set());
   };
 
+  // ─── Kleine Beitritts-Leiste (für alle Spielphasen) ──────────────────────
+  const JoinBar = () => (
+    <div className="flex items-center gap-4 p-3 bg-white/90 border border-purple-200 rounded-xl shadow mb-4">
+      <div className="flex-shrink-0">
+        <QRCodeSVG value={getGameLink()} size={64} level="H" includeMargin={false} />
+      </div>
+      <div className="flex flex-col gap-0.5 flex-1 min-w-0">
+        <span className="text-xs text-gray-500">Jetzt beitreten: <strong className="text-purple-700">promptbattle.vercel.app</strong></span>
+        <span className="text-2xl font-black tracking-widest text-purple-700 leading-tight">{getShortGameId()}</span>
+        <span className="text-xs text-gray-400">Zuschauerinnen können jederzeit beitreten</span>
+      </div>
+    </div>
+  );
+
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -736,6 +750,7 @@ export default function Home() {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-500 to-purple-600 p-4">
         <div className="max-w-6xl mx-auto">
+          <JoinBar />
           <div className="bg-white rounded-2xl shadow-2xl p-8">
             <div className="flex justify-between items-center mb-4">
               <h1 className="text-3xl font-bold text-gray-800">
@@ -823,6 +838,7 @@ export default function Home() {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-500 to-blue-600 p-4">
         <div className="max-w-6xl mx-auto">
+          <JoinBar />
           <div className="bg-white rounded-2xl shadow-2xl p-8">
             <div className="flex justify-between items-center mb-8">
               <h1 className="text-3xl font-bold text-gray-800">
@@ -1043,6 +1059,7 @@ export default function Home() {
     return (
       <div className="min-h-screen bg-gradient-to-br from-yellow-400 to-orange-500 p-4">
         <div className="max-w-6xl mx-auto">
+          <JoinBar />
           <div className="bg-white rounded-2xl shadow-2xl p-8">
             <h1 className="text-4xl font-bold text-center mb-4 text-gray-800">
               🏆 Ergebnisse
