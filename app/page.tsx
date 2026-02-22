@@ -2,21 +2,20 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { database } from '@/lib/firebase';
-import { ref, onValue, set, update, push, remove, get } from 'firebase/database';
+import { ref, onValue, set, update, push, get } from 'firebase/database';
 import { QRCodeSVG } from 'qrcode.react';
 
 type GamePhase = 'lobby' | 'creating' | 'voting' | 'results';
-type Role = 'player' | 'spectator';
+type Role = 'host' | 'player' | 'spectator';
 
 interface Player {
   id: string;
   name: string;
+  role: 'host' | 'player';
   prompt: string;
   imageUrl: string;
   votes: number;
-  vielfalt?: number;
-  treffend?: number;
-  phantasie?: number;
+  topic: string;
 }
 
 interface GameSettings {
@@ -29,1334 +28,784 @@ interface GameState {
   players: { [id: string]: Player };
   settings: GameSettings;
   timeRemaining: number;
-  startTime: number;
-  challenge?: string;
-  category?: string;
+  hostId: string;
+  topic: string;
 }
 
+// ─── Themen-Pool ────────────────────────────────────────────────────────────
+const TOPICS = [
+  'Ein Roboter lernt kochen – aber er versteht Zutaten wörtlich',
+  'Die letzte Bibliothek der Welt, bewacht von einem Drachen',
+  'Ein Supermarkt auf dem Mond um Mitternacht',
+  'Wenn Tiere plötzlich Berufe hätten: die Generalversammlung',
+  'Eine Zeitmaschine, die nur in die Vergangenheit der eigenen Wohnung reist',
+  'Das erste Café im Ozean – für Meeresbewohner',
+  'Ein Zirkus, der durch den Weltraum reist',
+  'Ein Museum für vergessene Träume',
+  'Der älteste Baum der Welt hält eine Rede',
+  'Ein Detektiv, der nur Geheimnisse von Wolken löst',
+  'Die Stadt, in der es verboten ist zu schlafen',
+  'Ein Koch, der Emotionen als Zutaten verwendet',
+  'Der Briefträger der Zukunft liefert Erinnerungen',
+  'Ein Konzert für Tiere im Regenwald',
+  'Die geheime Schule für Drachen im 21. Jahrhundert',
+];
+
+function getRandomTopic(): string {
+  return TOPICS[Math.floor(Math.random() * TOPICS.length)];
+}
+
+// ─── App ─────────────────────────────────────────────────────────────────────
 export default function Home() {
-  const [gameId, setGameId] = useState<string>('');
-  const [role, setRole] = useState<Role | null>(null);
-  const [playerName, setPlayerName] = useState('');
+  // Screen state
+  type Screen = 'start' | 'join' | 'game';
+  const [screen, setScreen] = useState<Screen>('start');
+
+  // User state
+  const [myName, setMyName] = useState('');
+  const [myRole, setMyRole] = useState<Role | null>(null);
+  const [myPlayerId, setMyPlayerId] = useState('');
+  const [gameId, setGameId] = useState('');
+  const [joinCode, setJoinCode] = useState('');
+
+  // Game state
   const [phase, setPhase] = useState<GamePhase>('lobby');
   const [players, setPlayers] = useState<{ [id: string]: Player }>({});
-  const [myPlayerId, setMyPlayerId] = useState<string>('');
-  const [myPrompt, setMyPrompt] = useState('');
+  const [settings, setSettings] = useState<GameSettings>({ promptTime: 120, votingTime: 30 });
   const [timeRemaining, setTimeRemaining] = useState(0);
-  const [hasVoted, setHasVoted] = useState(false);
-  const [settings, setSettings] = useState<GameSettings>({
-    promptTime: 120,
-    votingTime: 55,
-  });
+  const [globalTopic, setGlobalTopic] = useState('');
+  const [hostId, setHostId] = useState('');
+
+  // Local player state
+  const [myPrompt, setMyPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
-  const [joinGameId, setJoinGameId] = useState('');
-  const [showQRCode, setShowQRCode] = useState(false);
-  const [challenge, setChallenge] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState('');
-  const [currentRatingPlayer, setCurrentRatingPlayer] = useState<string | null>(null);
-  const [tempRatings, setTempRatings] = useState({ vielfalt: 0, treffend: 0, phantasie: 0 });
-  const [ratedPlayers, setRatedPlayers] = useState<Set<string>>(new Set());
-  const [totalGamesPlayed, setTotalGamesPlayed] = useState<number>(0);
-  const [showRatingReminder, setShowRatingReminder] = useState(false);
+  const [hasVoted, setHasVoted] = useState(false);
+
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const categories = [
-    { id: 'betrieb', name: 'Betrieb & Ausbildung', emoji: '💼', description: 'Arbeit, Werkzeuge, Alltag im Betrieb' },
-    { id: 'freizeit', name: 'Freizeit & Jugend', emoji: '🎮', description: 'Freunde, Handy, Wochenende' },
-    { id: 'familie', name: 'Familie & Zuhause', emoji: '👨‍👩‍👧', description: 'Sonntag, Zuhause, Verwandte' },
-    { id: 'jungsein', name: 'Jung sein heute', emoji: '⚡', description: 'Träume, Stress, Zukunft' },
-  ];
-
-  // Lade Gesamt-Anzahl gespielter Spiele
+  // ─── URL-Parameter auslesen (Einladungslink) ────────────────────────────────
   useEffect(() => {
-    const gamesRef = ref(database, 'games');
-    const unsubscribe = onValue(gamesRef, (snapshot) => {
-      const gamesData = snapshot.val();
-      if (gamesData) {
-        // Zähle nur Spiele die Results erreicht haben
-        const completedGames = Object.values(gamesData).filter(
-          (game: any) => game.phase === 'results'
-        ).length;
-        setTotalGamesPlayed(completedGames);
-      }
-    });
-    return () => unsubscribe();
+    const urlParams = new URLSearchParams(window.location.search);
+    const gId = urlParams.get('game');
+    if (gId) {
+      setJoinCode(gId.slice(-6).toUpperCase());
+      setScreen('join');
+    }
   }, []);
 
-  // Firebase Listener für Game State
+  // ─── Firebase Listener ────────────────────────────────────────────────────
   useEffect(() => {
     if (!gameId) return;
-
     const gameRef = ref(database, `games/${gameId}`);
-    
-    const unsubscribe = onValue(gameRef, (snapshot) => {
-      const data = snapshot.val() as GameState | null;
-      if (data) {
-        setPhase(data.phase);
-        setPlayers(data.players || {});
-        setSettings(data.settings);
-        setTimeRemaining(data.timeRemaining || 0);
-        if (data.challenge) setChallenge(data.challenge);
-        if (data.category) setSelectedCategory(data.category);
-      }
+    const unsub = onValue(gameRef, (snap) => {
+      const data = snap.val() as GameState | null;
+      if (!data) return;
+      setPhase(data.phase);
+      setPlayers(data.players || {});
+      setSettings(data.settings);
+      setTimeRemaining(data.timeRemaining || 0);
+      setGlobalTopic(data.topic || '');
+      setHostId(data.hostId || '');
     });
-
-    return () => unsubscribe();
+    return () => unsub();
   }, [gameId]);
 
-  // Timer Management
+  // ─── Timer Manager (nur Host) ─────────────────────────────────────────────
   useEffect(() => {
-    if (!gameId || role !== 'player' || Object.keys(players).length === 0) return;
-
-    // Nur eine Person managed den Timer (die erste in der Liste)
-    const playerIds = Object.keys(players).sort();
-    const isTimerManager = playerIds[0] === myPlayerId;
-
-    if (!isTimerManager) return;
-
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-    }
+    if (!gameId || myRole !== 'host') return;
+    if (timerRef.current) clearInterval(timerRef.current);
 
     if (phase === 'creating' || phase === 'voting') {
       timerRef.current = setInterval(async () => {
-        const gameRef = ref(database, `games/${gameId}`);
-        const snapshot = await get(gameRef);
-        const currentGame = snapshot.val() as GameState;
-
-        if (!currentGame) return;
-
-        // Prüfe in Creating Phase ob alle Teilnehmenden fertig sind
-        if (phase === 'creating') {
-          const allPlayers = Object.values(currentGame.players || {});
-          const allPlayersReady = allPlayers.length > 0 && allPlayers.every(p => p.imageUrl);
-          
-          if (allPlayersReady) {
-            // Alle fertig! Sofort zu Voting wechseln
-            await update(gameRef, {
-              phase: 'voting',
-              timeRemaining: settings.votingTime,
-            });
-            return;
-          }
-        }
-
-        const newTimeRemaining = currentGame.timeRemaining - 1;
-
-        if (newTimeRemaining <= 0) {
-          if (phase === 'creating') {
-            await update(gameRef, {
-              phase: 'voting',
-              timeRemaining: settings.votingTime,
-            });
-          } else if (phase === 'voting') {
-            await update(gameRef, {
-              phase: 'results',
-              timeRemaining: 0,
-            });
+        const snap = await get(ref(database, `games/${gameId}`));
+        const current = snap.val() as GameState;
+        if (!current) return;
+        const newTime = current.timeRemaining - 1;
+        if (newTime <= 0) {
+          if (current.phase === 'creating') {
+            await update(ref(database, `games/${gameId}`), { phase: 'voting', timeRemaining: current.settings.votingTime });
+          } else if (current.phase === 'voting') {
+            await update(ref(database, `games/${gameId}`), { phase: 'results', timeRemaining: 0 });
           }
         } else {
-          await update(gameRef, { timeRemaining: newTimeRemaining });
+          await update(ref(database, `games/${gameId}`), { timeRemaining: newTime });
         }
       }, 1000);
     }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [gameId, phase, myRole]);
 
-    return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
-    };
-  }, [gameId, phase, myPlayerId, players, role, settings]);
+  // ─── Helpers ──────────────────────────────────────────────────────────────
+  const getGameLink = () =>
+    typeof window !== 'undefined' ? `${window.location.origin}?game=${gameId}` : '';
 
-  const createNewGame = async () => {
-    const newGameRef = push(ref(database, 'games'));
-    const newGameId = newGameRef.key!;
-    
-    const initialState: GameState = {
-      phase: 'lobby',
-      players: {},
-      settings: { promptTime: 120, votingTime: 55 },
-      timeRemaining: 0,
-      startTime: Date.now(),
-    };
+  const getShortCode = () => gameId.slice(-6).toUpperCase();
 
-    await set(newGameRef, initialState);
-    setGameId(newGameId);
-    
-    return newGameId;
+  const copyLink = () => {
+    navigator.clipboard.writeText(getGameLink());
   };
 
-  const joinGame = async (gId: string) => {
-    const gameRef = ref(database, `games/${gId}`);
-    const snapshot = await get(gameRef);
-    
-    if (snapshot.exists()) {
-      setGameId(gId);
-      return true;
-    }
-    return false;
-  };
+  const formatTime = (s: number) =>
+    `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
 
-  const joinAsPlayer = async (existingGameId?: string) => {
-    if (!playerName.trim()) return;
+  // ─── Actions ───────────────────────────────────────────────────────────────
 
-    let gId = existingGameId || gameId;
-    if (!gId) {
-      gId = await createNewGame();
-    }
+  /** Host: Neues Spiel erstellen */
+  const createGame = async () => {
+    if (!myName.trim()) return;
+    const topic = getRandomTopic();
+    const newRef = push(ref(database, 'games'));
+    const gId = newRef.key!;
 
-    // WICHTIG: Setze gameId im State damit Firebase Listener funktioniert!
-    setGameId(gId);
-
-    const playerCount = Object.keys(players).length;
-    if (playerCount >= 3) {
-      alert('Spiel ist voll! Maximal 3 Teilnehmende.');
-      return;
-    }
-
-    const newPlayerId = push(ref(database, `games/${gId}/players`)).key!;
-    
-    const newPlayer: Player = {
-      id: newPlayerId,
-      name: playerName,
+    const hostPlayerId = push(ref(database, `games/${gId}/players`)).key!;
+    const hostPlayer: Player = {
+      id: hostPlayerId,
+      name: myName,
+      role: 'host',
       prompt: '',
       imageUrl: '',
       votes: 0,
+      topic,
     };
 
-    await set(ref(database, `games/${gId}/players/${newPlayerId}`), newPlayer);
-    
-    setMyPlayerId(newPlayerId);
-    setRole('player');
+    const initialState: GameState = {
+      phase: 'lobby',
+      players: { [hostPlayerId]: hostPlayer },
+      settings: { promptTime: 120, votingTime: 30 },
+      timeRemaining: 0,
+      hostId: hostPlayerId,
+      topic,
+    };
+
+    await set(newRef, initialState);
+    setGameId(gId);
+    setMyPlayerId(hostPlayerId);
+    setMyRole('host');
+    setGlobalTopic(topic);
+    setScreen('game');
   };
 
-  const joinAsSpectator = async (existingGameId?: string) => {
-    let gId = existingGameId || gameId;
-    if (!gId) {
-      gId = await createNewGame();
+  /** Eingeladene: per Code beitreten */
+  const joinGame = async (asRole: 'player' | 'spectator') => {
+    const code = joinCode.trim().toUpperCase();
+    if (!code) return;
+
+    // Suche Game mit diesem Kurz-Code (letzte 6 Zeichen der gameId)
+    const snap = await get(ref(database, 'games'));
+    if (!snap.exists()) { alert('Spiel nicht gefunden!'); return; }
+
+    let foundGameId: string | null = null;
+    snap.forEach((child) => {
+      if (child.key && child.key.slice(-6).toUpperCase() === code) {
+        foundGameId = child.key;
+      }
+    });
+
+    if (!foundGameId) { alert('Spiel nicht gefunden! Prüfe den Code.'); return; }
+
+    const gId = foundGameId;
+    const gameSnap = await get(ref(database, `games/${gId}`));
+    const gameData = gameSnap.val() as GameState;
+
+    if (gameData.phase !== 'lobby') { alert('Das Spiel hat bereits begonnen!'); return; }
+
+    if (asRole === 'player') {
+      if (!myName.trim()) return;
+      const playerCount = Object.keys(gameData.players || {}).length;
+      if (playerCount >= 4) { alert('Spiel ist voll! Maximal 4 Mitstreiterinnen.'); return; }
+
+      const newPlayerId = push(ref(database, `games/${gId}/players`)).key!;
+      const newPlayer: Player = {
+        id: newPlayerId,
+        name: myName,
+        role: 'player',
+        prompt: '',
+        imageUrl: '',
+        votes: 0,
+        topic: gameData.topic,
+      };
+      await set(ref(database, `games/${gId}/players/${newPlayerId}`), newPlayer);
+      setMyPlayerId(newPlayerId);
+      setMyRole('player');
+    } else {
+      setMyRole('spectator');
     }
+
     setGameId(gId);
-    setRole('spectator');
+    setScreen('game');
   };
 
   const startGame = async () => {
     if (Object.keys(players).length < 2) return;
-
     await update(ref(database, `games/${gameId}`), {
       phase: 'creating',
       timeRemaining: settings.promptTime,
     });
   };
 
-  const updateSettings = async (newSettings: Partial<GameSettings>) => {
-    const updated = { ...settings, ...newSettings };
+  const updateSettings = async (patch: Partial<GameSettings>) => {
+    const updated = { ...settings, ...patch };
     setSettings(updated);
-    
-    if (gameId) {
-      await update(ref(database, `games/${gameId}/settings`), updated);
-    }
-  };
-
-  const generateChallenge = async () => {
-    if (!selectedCategory) {
-      alert('Bitte wähle zuerst eine Kategorie!');
-      return;
-    }
-
-    setIsGenerating(true);
-
-    try {
-      const response = await fetch('/api/generate-challenge', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          category: selectedCategory,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'API Fehler');
-      }
-
-      const generatedChallenge = data.challenge;
-      
-      setChallenge(generatedChallenge);
-      
-      // Speichere Challenge in Firebase
-      await update(ref(database, `games/${gameId}`), {
-        challenge: generatedChallenge,
-        category: selectedCategory,
-      });
-
-    } catch (error: any) {
-      alert(`Fehler beim Generieren: ${error.message}`);
-    } finally {
-      setIsGenerating(false);
-    }
+    if (gameId) await update(ref(database, `games/${gameId}/settings`), updated);
   };
 
   const generateImage = async () => {
-    if (!myPrompt.trim()) {
-      alert('Bitte gib einen Prompt ein!');
-      return;
-    }
-
+    if (!myPrompt.trim()) return;
+    const apiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
+    if (!apiKey) { alert('OpenAI API Key fehlt.'); return; }
     setIsGenerating(true);
-
     try {
-      const response = await fetch('/api/generate-image', {
+      const res = await fetch('https://api.openai.com/v1/images/generations', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          prompt: myPrompt,
-        }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model: 'dall-e-3', prompt: myPrompt, n: 1, size: '1024x1024' }),
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'API Fehler');
-      }
-
-      const imageUrl = data.imageUrl;
-
+      if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message); }
+      const data = await res.json();
       await update(ref(database, `games/${gameId}/players/${myPlayerId}`), {
         prompt: myPrompt,
-        imageUrl: imageUrl,
+        imageUrl: data.data[0].url,
       });
-
-      alert('Bild erfolgreich generiert!');
-    } catch (error: any) {
-      alert(`Fehler beim Generieren: ${error.message}`);
+    } catch (e: any) {
+      alert(`Fehler: ${e.message}`);
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const submitRating = async (playerId: string) => {
-    if (phase !== 'voting') return;
-    
-    // Teilnehmende können nicht voten, nur Zuschauer*innen!
-    if (role === 'player') {
-      alert('Teilnehmende können nicht voten! Nur Zuschauer*innen dürfen bewerten.');
-      return;
-    }
-
-    // Prüfe ob alle Kategorien bewertet wurden
-    if (tempRatings.vielfalt === 0 || tempRatings.treffend === 0 || tempRatings.phantasie === 0) {
-      alert('Bitte bewerte alle 3 Kategorien!');
-      return;
-    }
-
-    // Berechne Gesamtpunkte (Treffend doppelt gezählt)
-    const totalPoints = tempRatings.vielfalt + (tempRatings.treffend * 2) + tempRatings.phantasie;
-
-    const currentPlayer = players[playerId];
-    
-    await update(ref(database, `games/${gameId}/players/${playerId}`), {
-      votes: (currentPlayer?.votes || 0) + totalPoints,
-      vielfalt: (currentPlayer?.vielfalt || 0) + tempRatings.vielfalt,
-      treffend: (currentPlayer?.treffend || 0) + tempRatings.treffend,
-      phantasie: (currentPlayer?.phantasie || 0) + tempRatings.phantasie,
-    });
-
-    // Markiere dieses Bild als bewertet
-    const newRatedPlayers = new Set(ratedPlayers);
-    newRatedPlayers.add(playerId);
-    setRatedPlayers(newRatedPlayers);
-
-    // Prüfe ob ALLE Bilder bewertet wurden
-    const allPlayerIds = Object.keys(players);
-    const allRated = allPlayerIds.every(id => newRatedPlayers.has(id));
-
-    if (allRated) {
-      setHasVoted(true);
-      setShowRatingReminder(false);
-    } else {
-      // Zeige Reminder dass noch Bilder zu bewerten sind
-      setShowRatingReminder(true);
-      setTimeout(() => setShowRatingReminder(false), 5000);
-    }
-
-    setCurrentRatingPlayer(null);
-    setTempRatings({ vielfalt: 0, treffend: 0, phantasie: 0 });
+  const vote = async (playerId: string) => {
+    if (hasVoted || phase !== 'voting') return;
+    if (myRole !== 'spectator') return; // Nur Zuschauer stimmen ab
+    const current = players[playerId]?.votes || 0;
+    await update(ref(database, `games/${gameId}/players/${playerId}`), { votes: current + 1 });
+    setHasVoted(true);
   };
 
   const resetGame = async () => {
-    if (!gameId) return;
-
-    await update(ref(database, `games/${gameId}`), {
+    const topic = getRandomTopic();
+    const snap = await get(ref(database, `games/${gameId}/players`));
+    const updates: Record<string, unknown> = {
       phase: 'lobby',
       timeRemaining: 0,
-    });
-
-    // Reset all players
-    const playersRef = ref(database, `games/${gameId}/players`);
-    const snapshot = await get(playersRef);
-    if (snapshot.exists()) {
-      const updates: any = {};
-      Object.keys(snapshot.val()).forEach(pId => {
-        updates[`${pId}/prompt`] = '';
-        updates[`${pId}/imageUrl`] = '';
-        updates[`${pId}/votes`] = 0;
+      topic,
+    };
+    if (snap.exists()) {
+      Object.keys(snap.val()).forEach((pId) => {
+        updates[`players/${pId}/prompt`] = '';
+        updates[`players/${pId}/imageUrl`] = '';
+        updates[`players/${pId}/votes`] = 0;
+        updates[`players/${pId}/topic`] = topic;
       });
-      await update(playersRef, updates);
     }
-
+    await update(ref(database, `games/${gameId}`), updates);
     setHasVoted(false);
     setMyPrompt('');
   };
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SCREENS
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  const getGameLink = () => {
-    return `${window.location.origin}?game=${gameId}`;
-  };
-
-  const getShortGameId = () => {
-    // Zeige nur die letzten 8 Zeichen der Game ID
-    return gameId.slice(-8);
-  };
-
-  const copyGameLink = () => {
-    const link = getGameLink();
-    navigator.clipboard.writeText(link);
-    alert('Game-Link kopiert! Teile ihn mit anderen Teilnehmenden.');
-  };
-
-  const copyShortLink = () => {
-    const shortId = getShortGameId();
-    navigator.clipboard.writeText(shortId);
-    alert(`Kurz-Code kopiert: ${shortId}\nAndere können diesen Code eingeben um beizutreten!`);
-  };
-
-  // Check for game ID in URL and auto-join
-  useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const gameIdFromUrl = urlParams.get('game');
-    if (gameIdFromUrl && !gameId && !role) {
-      // Auto-join flow
-      setJoinGameId(gameIdFromUrl);
-      joinGame(gameIdFromUrl).then((success) => {
-        if (success) {
-          // Zeige Join-Screen mit vorausgefüllter Game-ID
-          setGameId(gameIdFromUrl);
-        }
-      });
-    }
-  }, []);
-
-  // Initial Screen - Game auswählen
-  if (!role) {
-    // Wenn gameId existiert (via Link), zeige Join-Screen
-    if (gameId || joinGameId) {
-      const displayGameId = gameId || joinGameId;
-      return (
-        <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-500 to-purple-600 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full">
-            <h1 className="text-4xl font-bold text-center mb-4 text-gray-800">
-              🎮 Du wurdest eingeladen!
-            </h1>
-            <p className="text-center text-gray-600 mb-8">
-              Game ID: <code className="bg-gray-100 px-2 py-1 rounded">{displayGameId}</code>
-            </p>
-            
-            <div className="space-y-4">
-              <input
-                type="text"
-                value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
-                placeholder="Dein Name"
-                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none text-gray-800"
-                maxLength={20}
-              />
-
-              <button
-                onClick={async () => {
-                  if (playerName.trim()) {
-                    await joinAsPlayer(displayGameId);
-                  }
-                }}
-                disabled={!playerName.trim()}
-                className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 disabled:bg-gray-400 transition"
-              >
-                Als Teilnehmer*in beitreten
-              </button>
-
-              <button
-                onClick={async () => {
-                  await joinAsSpectator(displayGameId);
-                }}
-                className="w-full bg-teal-600 text-white py-3 rounded-lg font-semibold hover:bg-teal-700 transition"
-              >
-                Als Zuschauer*in beitreten
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    // Normaler Start-Screen (kein Link)
+  // ─── Start-Screen ──────────────────────────────────────────────────────────
+  if (screen === 'start') {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-purple-500 to-pink-500 p-4">
-        <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full">
-          <h1 className="text-4xl font-bold text-center mb-4 text-gray-800">
-            🎨 Prompt Battle Arena
-          </h1>
-          
-          {/* Spiel-Counter */}
-          <div className="mb-6 p-3 bg-gradient-to-r from-purple-100 to-pink-100 rounded-lg text-center">
-            <p className="text-sm text-gray-600">Bisher gespielt</p>
-            <p className="text-3xl font-bold text-purple-600">{totalGamesPlayed}</p>
-            <p className="text-xs text-gray-500">abgeschlossene Spiele</p>
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 p-4">
+        <div className="bg-white rounded-3xl shadow-2xl p-8 w-full max-w-sm">
+          <div className="text-center mb-8">
+            <div className="text-5xl mb-3">🎨</div>
+            <h1 className="text-3xl font-black text-gray-800">Prompt Battle</h1>
+            <p className="text-gray-500 mt-1 text-sm">KI-Bilderwettbewerb</p>
           </div>
-          
-          <div className="space-y-6">
+
+          <div className="space-y-4">
             <div>
+              <label className="block text-sm font-semibold text-gray-600 mb-1">Dein Name</label>
               <input
                 type="text"
-                value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
-                placeholder="Dein Name"
-                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none text-gray-800 mb-4"
+                value={myName}
+                onChange={(e) => setMyName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && createGame()}
+                placeholder="Name eingeben..."
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-purple-500 focus:outline-none text-gray-800 text-base"
                 maxLength={20}
               />
-
-              <button
-                onClick={async () => {
-                  if (playerName.trim()) {
-                    await createNewGame();
-                    await joinAsPlayer();
-                  }
-                }}
-                disabled={!playerName.trim()}
-                className="w-full bg-purple-600 text-white py-3 rounded-lg font-semibold hover:bg-purple-700 disabled:bg-gray-400 transition mb-2"
-              >
-                Neues Spiel erstellen
-              </button>
-
-              <button
-                onClick={async () => {
-                  if (playerName.trim()) {
-                    await createNewGame();
-                    await joinAsSpectator();
-                  }
-                }}
-                disabled={!playerName.trim()}
-                className="w-full bg-pink-600 text-white py-3 rounded-lg font-semibold hover:bg-pink-700 disabled:bg-gray-400 transition"
-              >
-                Als Zuschauer neues Spiel erstellen
-              </button>
             </div>
 
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-gray-300"></div>
-              </div>
-              <div className="relative flex justify-center text-sm">
-                <span className="px-2 bg-white text-gray-500">oder</span>
-              </div>
+            <button
+              onClick={createGame}
+              disabled={!myName.trim()}
+              className="w-full bg-gradient-to-r from-purple-600 to-pink-500 text-white py-3 rounded-xl font-bold text-base hover:opacity-90 disabled:opacity-40 transition shadow"
+            >
+              Neues Spiel erstellen
+            </button>
+
+            <div className="relative flex items-center gap-3">
+              <div className="flex-1 border-t border-gray-200" />
+              <span className="text-gray-400 text-sm">oder</span>
+              <div className="flex-1 border-t border-gray-200" />
             </div>
 
-            <div>
-              <input
-                type="text"
-                value={joinGameId}
-                onChange={(e) => setJoinGameId(e.target.value)}
-                placeholder="Game-ID eingeben"
-                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none text-gray-800 mb-4"
-              />
-
-              <button
-                onClick={async () => {
-                  if (joinGameId.trim() && playerName.trim()) {
-                    const success = await joinGame(joinGameId);
-                    if (success) {
-                      await joinAsPlayer(joinGameId);
-                    } else {
-                      alert('Spiel nicht gefunden!');
-                    }
-                  }
-                }}
-                disabled={!joinGameId.trim() || !playerName.trim()}
-                className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 disabled:bg-gray-400 transition mb-2"
-              >
-                Spiel beitreten (als Teilnehmer*in)
-              </button>
-
-              <button
-                onClick={async () => {
-                  if (joinGameId.trim()) {
-                    const success = await joinGame(joinGameId);
-                    if (success) {
-                      await joinAsSpectator(joinGameId);
-                    } else {
-                      alert('Spiel nicht gefunden!');
-                    }
-                  }
-                }}
-                disabled={!joinGameId.trim()}
-                className="w-full bg-teal-600 text-white py-3 rounded-lg font-semibold hover:bg-teal-700 disabled:bg-gray-400 transition"
-              >
-                Spiel beitreten (als Zuschauer*in)
-              </button>
-            </div>
+            <button
+              onClick={() => setScreen('join')}
+              className="w-full bg-gray-100 text-gray-700 py-3 rounded-xl font-semibold text-base hover:bg-gray-200 transition"
+            >
+              Mit Code beitreten
+            </button>
           </div>
         </div>
       </div>
     );
   }
 
-  // Lobby
+  // ─── Join-Screen ───────────────────────────────────────────────────────────
+  if (screen === 'join') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-500 to-teal-400 p-4">
+        <div className="bg-white rounded-3xl shadow-2xl p-8 w-full max-w-sm">
+          <div className="text-center mb-6">
+            <div className="text-5xl mb-3">🔗</div>
+            <h1 className="text-2xl font-black text-gray-800">Einladung annehmen</h1>
+            <p className="text-gray-500 text-sm mt-1">Gib den 6-stelligen Code ein</p>
+          </div>
+
+          {/* Grosser Code-Input */}
+          <div className="mb-6">
+            <input
+              type="text"
+              value={joinCode}
+              onChange={(e) => setJoinCode(e.target.value.toUpperCase().slice(0, 6))}
+              placeholder="CODE"
+              className="w-full px-4 py-4 border-2 border-gray-200 rounded-xl focus:border-blue-500 focus:outline-none text-center text-3xl font-black tracking-widest text-gray-800 uppercase"
+              maxLength={6}
+            />
+          </div>
+
+          {/* Name nur für Mitspieler */}
+          <div className="mb-6">
+            <label className="block text-sm font-semibold text-gray-600 mb-1">Dein Name (für Mitstreiterinnen)</label>
+            <input
+              type="text"
+              value={myName}
+              onChange={(e) => setMyName(e.target.value)}
+              placeholder="Name eingeben..."
+              className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-blue-500 focus:outline-none text-gray-800"
+              maxLength={20}
+            />
+          </div>
+
+          <div className="space-y-3">
+            <button
+              onClick={() => joinGame('player')}
+              disabled={!joinCode.trim() || !myName.trim()}
+              className="w-full bg-gradient-to-r from-blue-600 to-teal-500 text-white py-3 rounded-xl font-bold hover:opacity-90 disabled:opacity-40 transition shadow"
+            >
+              Als Mitstreiterin beitreten
+            </button>
+            <button
+              onClick={() => joinGame('spectator')}
+              disabled={!joinCode.trim()}
+              className="w-full bg-gray-100 text-gray-700 py-3 rounded-xl font-semibold hover:bg-gray-200 transition"
+            >
+              Als Zuschauerin beitreten
+            </button>
+          </div>
+
+          <button
+            onClick={() => setScreen('start')}
+            className="mt-4 w-full text-gray-400 text-sm hover:text-gray-600 transition"
+          >
+            ← Zurück
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GAME SCREENS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const playersList = Object.values(players);
+  const isHost = myRole === 'host';
+  const isPlayer = myRole === 'host' || myRole === 'player';
+  const myPlayer = players[myPlayerId];
+
+  // ─── Lobby ─────────────────────────────────────────────────────────────────
   if (phase === 'lobby') {
-    const playersList = Object.values(players);
+    const shortCode = getShortCode();
 
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-500 to-pink-500 p-4">
-        <div className="max-w-4xl mx-auto">
-          <div className="bg-white rounded-2xl shadow-2xl p-8">
-            <div className="flex justify-between items-center mb-6">
-              <h1 className="text-4xl font-bold text-gray-800">Lobby</h1>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setShowQRCode(true)}
-                  className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition text-sm"
-                >
-                  📱 QR-Code
-                </button>
-                <button
-                  onClick={copyShortLink}
-                  className="bg-orange-500 text-white px-4 py-2 rounded-lg hover:bg-orange-600 transition text-sm"
-                >
-                  🔗 Kurz-Code
-                </button>
-                <button
-                  onClick={copyGameLink}
-                  className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition text-sm"
-                >
-                  📋 Link
-                </button>
+      <div className="min-h-screen bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 p-4">
+        <div className="max-w-5xl mx-auto space-y-4">
+
+          {/* Header */}
+          <div className="bg-white rounded-2xl shadow-xl p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-3xl font-black text-gray-800">Prompt Battle</h1>
+                <p className="text-gray-500 text-sm">
+                  {isHost ? 'Du bist die Spielleiterin' : myRole === 'player' ? 'Du bist Mitstreiterin' : 'Du schaust zu'}
+                </p>
+              </div>
+              <div className="text-right">
+                <div className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-1">Spieler</div>
+                <div className="text-3xl font-black text-purple-600">{playersList.length}/4</div>
               </div>
             </div>
-
-            <div className="mb-4 p-3 bg-gray-100 rounded-lg">
-              <p className="text-sm text-gray-600 mb-2">
-                <strong>Game ID:</strong> <code className="bg-gray-200 px-2 py-1 rounded">{gameId}</code>
-              </p>
-              <p className="text-sm text-gray-600">
-                <strong>Kurz-Code:</strong> <code className="bg-gray-200 px-2 py-1 rounded text-lg font-bold">{getShortGameId()}</code>
-              </p>
-            </div>
-
-            {/* QR-Code Modal */}
-            {showQRCode && (
-              <div 
-                className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-                onClick={() => setShowQRCode(false)}
-              >
-                <div 
-                  className="bg-white rounded-2xl p-8 max-w-md"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <h2 className="text-2xl font-bold text-center mb-4 text-gray-800">
-                    📱 Scanne zum Beitreten
-                  </h2>
-                  <div className="flex justify-center mb-4">
-                    <QRCodeSVG 
-                      value={getGameLink()} 
-                      size={256}
-                      level="H"
-                      includeMargin={true}
-                    />
-                  </div>
-                  <p className="text-center text-sm text-gray-600 mb-2">
-                    Oder verwende den Kurz-Code:
-                  </p>
-                  <p className="text-center text-3xl font-bold text-purple-600 mb-4">
-                    {getShortGameId()}
-                  </p>
-                  <button
-                    onClick={() => setShowQRCode(false)}
-                    className="w-full bg-gray-200 text-gray-800 py-3 rounded-lg font-semibold hover:bg-gray-300 transition"
-                  >
-                    Schließen
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div className="mb-4 p-3 bg-gray-100 rounded-lg hidden">
-              <p className="text-sm text-gray-600">
-                <strong>Game ID:</strong> <code className="bg-gray-200 px-2 py-1 rounded">{gameId}</code>
-              </p>
-            </div>
-
-            {role === 'player' && (
-              <div className="mb-8 p-6 bg-blue-50 rounded-lg">
-                <h2 className="text-xl font-semibold mb-4 text-gray-800">Spieleinstellungen</h2>
-                
-                {/* Kategorie Auswahl */}
-                <div className="mb-6">
-                  <label className="block text-sm font-medium mb-3 text-gray-700">
-                    Wähle eine Kategorie:
-                  </label>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    {categories.map((cat) => (
-                      <button
-                        key={cat.id}
-                        onClick={() => setSelectedCategory(cat.id)}
-                        className={`p-4 rounded-lg border-2 transition ${
-                          selectedCategory === cat.id
-                            ? 'border-purple-500 bg-purple-100'
-                            : 'border-gray-300 bg-white hover:border-purple-300'
-                        }`}
-                      >
-                        <div className="text-3xl mb-2">{cat.emoji}</div>
-                        <div className="font-bold text-gray-800">{cat.name}</div>
-                        <div className="text-xs text-gray-600 mt-1">{cat.description}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Challenge Generator */}
-                <div className="mb-6">
-                  <button
-                    onClick={generateChallenge}
-                    disabled={!selectedCategory || isGenerating}
-                    className="w-full bg-purple-600 text-white py-3 rounded-lg font-semibold hover:bg-purple-700 disabled:bg-gray-400 transition mb-3"
-                  >
-                    {isGenerating ? '🎨 Generiere Aufgabe...' : '🎨 Aufgabe generieren'}
-                  </button>
-                  
-                  {challenge && (
-                    <div className="p-4 bg-white rounded-lg border-2 border-purple-300">
-                      <div className="font-bold text-purple-600 mb-2">📋 Aufgabe:</div>
-                      <div className="text-gray-800">{challenge}</div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium mb-2 text-gray-700">
-                      Prompt-Zeit (Sekunden): {settings.promptTime}
-                    </label>
-                    <input
-                      type="range"
-                      min="30"
-                      max="300"
-                      step="30"
-                      value={settings.promptTime}
-                      onChange={(e) =>
-                        updateSettings({ promptTime: parseInt(e.target.value) })
-                      }
-                      className="w-full"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium mb-2 text-gray-700">
-                      Voting-Zeit (Sekunden): {settings.votingTime}
-                    </label>
-                    <input
-                      type="range"
-                      min="15"
-                      max="60"
-                      step="5"
-                      value={settings.votingTime}
-                      onChange={(e) =>
-                        updateSettings({ votingTime: parseInt(e.target.value) })
-                      }
-                      className="w-full"
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className="mb-8">
-              <h2 className="text-2xl font-semibold mb-4 text-gray-800">
-                Teilnehmende ({playersList.length}/3)
-              </h2>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {playersList.map((player) => (
-                  <div
-                    key={player.id}
-                    className="p-4 bg-gradient-to-br from-purple-100 to-pink-100 rounded-lg"
-                  >
-                    <div className="text-lg font-semibold text-gray-800">{player.name}</div>
-                    {player.id === myPlayerId && (
-                      <div className="text-sm text-purple-600 font-medium">Das bist du!</div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {role === 'player' && playersList.length >= 2 && (
-              <button
-                onClick={startGame}
-                className="w-full bg-green-600 text-white py-4 rounded-lg font-bold text-lg hover:bg-green-700 transition"
-              >
-                Spiel starten!
-              </button>
-            )}
-
-            {role === 'spectator' && (
-              <div className="text-center text-gray-600">
-                Warten auf Spielstart durch eine*n Teilnehmer*in...
-              </div>
-            )}
-
-            {playersList.length < 2 && (
-              <div className="text-center text-gray-600 mt-4">
-                Mindestens 2 Teilnehmende benötigt zum Starten
-              </div>
-            )}
           </div>
-        </div>
-      </div>
-    );
-  }
 
-  // Creating Phase
-  if (phase === 'creating') {
-    const playersList = Object.values(players);
+          {/* Einladungs-Box – immer sichtbar */}
+          <div className="bg-white rounded-2xl shadow-xl p-6">
+            <h2 className="text-lg font-bold text-gray-800 mb-4">Einladung teilen</h2>
 
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-500 to-purple-600 p-4">
-        <div className="max-w-6xl mx-auto">
-          <div className="bg-white rounded-2xl shadow-2xl p-8">
-            <div className="flex justify-between items-center mb-4">
-              <h1 className="text-3xl font-bold text-gray-800">
-                🎨 Erstelle dein Bild!
-              </h1>
-              <div className="flex items-center gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+              {/* QR-Code */}
+              <div className="flex flex-col items-center">
+                <div className="p-3 bg-white border-2 border-gray-200 rounded-xl inline-block mb-3">
+                  <QRCodeSVG value={getGameLink()} size={160} level="H" includeMargin />
+                </div>
+                <p className="text-xs text-gray-500">Kamera auf QR-Code richten</p>
+              </div>
+
+              {/* Code + Link */}
+              <div className="space-y-4">
+                <div>
+                  <div className="text-xs text-gray-500 uppercase tracking-wide font-semibold mb-1">6-stelliger Code</div>
+                  <div className="bg-gradient-to-r from-purple-50 to-pink-50 border-2 border-purple-200 rounded-xl px-4 py-3 text-center">
+                    <span className="text-4xl font-black tracking-widest text-purple-700">{shortCode}</span>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1 text-center">Auf phone-battle.app (oder Link oben) eingeben</p>
+                </div>
+
                 <button
-                  onClick={() => setShowQRCode(true)}
-                  className="bg-green-500 text-white px-3 py-2 rounded-lg hover:bg-green-600 transition text-sm"
+                  onClick={copyLink}
+                  className="w-full bg-purple-100 text-purple-700 py-2 rounded-lg font-semibold text-sm hover:bg-purple-200 transition"
                 >
-                  📱 QR
+                  Link kopieren
                 </button>
-                <div className="text-2xl font-bold text-purple-600">
-                  {formatTime(timeRemaining)}
+
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
+                  <strong>Thema wird automatisch zugeteilt</strong> – alle Spielerinnen bekommen dieselbe Aufgabe nach dem Beitreten.
                 </div>
               </div>
             </div>
+          </div>
 
-            {/* Zeige Challenge */}
-            {challenge && (
-              <div className="mb-6 p-4 bg-gradient-to-r from-purple-100 to-blue-100 rounded-lg border-2 border-purple-300">
-                <div className="font-bold text-purple-600 mb-2">📋 Aufgabe:</div>
-                <div className="text-gray-800 text-lg">{challenge}</div>
-                <div className="text-sm text-gray-600 mt-2">
-                  Kategorie: {categories.find(c => c.id === selectedCategory)?.emoji} {categories.find(c => c.id === selectedCategory)?.name}
-                </div>
+          {/* Thema */}
+          {globalTopic && (
+            <div className="bg-white rounded-2xl shadow-xl p-6">
+              <h2 className="text-lg font-bold text-gray-800 mb-2">Zugewiesenes Thema</h2>
+              <div className="p-4 bg-gradient-to-r from-indigo-50 to-purple-50 border-2 border-indigo-200 rounded-xl">
+                <p className="text-gray-800 text-base font-medium">{globalTopic}</p>
               </div>
-            )}
-
-            {role === 'player' && (
-              <div className="mb-8 p-6 bg-purple-50 rounded-lg">
-                <label className="block text-sm font-medium mb-2 text-gray-700">
-                  Dein Prompt (nur du siehst diesen):
-                </label>
-                <textarea
-                  value={myPrompt}
-                  onChange={(e) => setMyPrompt(e.target.value)}
-                  placeholder="Beschreibe dein Bild..."
-                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none mb-4 h-32 text-gray-800"
-                  disabled={isGenerating}
-                />
+              {isHost && (
                 <button
-                  onClick={generateImage}
-                  disabled={isGenerating || !myPrompt.trim()}
-                  className="w-full bg-purple-600 text-white py-3 rounded-lg font-semibold hover:bg-purple-700 disabled:bg-gray-400 transition"
+                  onClick={async () => {
+                    const topic = getRandomTopic();
+                    setGlobalTopic(topic);
+                    await update(ref(database, `games/${gameId}`), { topic });
+                    const snap = await get(ref(database, `games/${gameId}/players`));
+                    if (snap.exists()) {
+                      const updates: Record<string, string> = {};
+                      Object.keys(snap.val()).forEach((pId) => { updates[`${pId}/topic`] = topic; });
+                      await update(ref(database, `games/${gameId}/players`), updates);
+                    }
+                  }}
+                  className="mt-2 text-xs text-indigo-500 hover:text-indigo-700 transition"
                 >
-                  {isGenerating ? 'Generiere Bild...' : 'Bild generieren'}
+                  Anderes Thema ziehen
                 </button>
-              </div>
-            )}
+              )}
+            </div>
+          )}
 
-            <h2 className="text-2xl font-semibold mb-4 text-gray-800">
-              {role === 'spectator' ? 'Live Prompts der Teilnehmenden:' : 'Generierte Bilder:'}
-            </h2>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {playersList.map((player) => (
-                <div
-                  key={player.id}
-                  className="p-4 bg-gradient-to-br from-blue-50 to-purple-50 rounded-lg"
-                >
-                  <div className="font-bold text-lg mb-2 text-gray-800">{player.name}</div>
-                  
-                  {role === 'spectator' && (
-                    <div className="mb-2 p-2 bg-white rounded text-sm text-gray-700">
-                      <strong>Prompt:</strong> {player.prompt || 'Noch kein Prompt...'}
-                    </div>
-                  )}
-
-                  {player.imageUrl ? (
-                    <img
-                      src={player.imageUrl}
-                      alt={`${player.name}'s creation`}
-                      className="w-full h-64 object-cover rounded-lg"
-                    />
-                  ) : (
-                    <div className="w-full h-64 bg-gray-200 rounded-lg flex items-center justify-center text-gray-500">
-                      Wartet auf Bild...
-                    </div>
-                  )}
+          {/* Spielerliste */}
+          <div className="bg-white rounded-2xl shadow-xl p-6">
+            <h2 className="text-lg font-bold text-gray-800 mb-4">Teilnehmende</h2>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {playersList.map((p) => (
+                <div key={p.id} className="p-3 bg-gradient-to-br from-purple-50 to-pink-50 rounded-xl text-center">
+                  <div className="text-2xl mb-1">{p.role === 'host' ? '👑' : '⚔️'}</div>
+                  <div className="font-bold text-sm text-gray-800 truncate">{p.name}</div>
+                  <div className="text-xs text-gray-500">{p.role === 'host' ? 'Spielleiterin' : 'Mitstreiterin'}</div>
+                </div>
+              ))}
+              {/* Leere Slots */}
+              {Array.from({ length: Math.max(0, 4 - playersList.length) }).map((_, i) => (
+                <div key={`empty-${i}`} className="p-3 border-2 border-dashed border-gray-200 rounded-xl text-center">
+                  <div className="text-2xl mb-1 opacity-20">?</div>
+                  <div className="text-xs text-gray-300">Wartet...</div>
                 </div>
               ))}
             </div>
+          </div>
 
-            {/* QR-Code Modal */}
-            {showQRCode && (
-              <div 
-                className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-                onClick={() => setShowQRCode(false)}
-              >
-                <div 
-                  className="bg-white rounded-2xl p-8 max-w-md"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <h2 className="text-2xl font-bold text-center mb-4 text-gray-800">
-                    📱 Als Zuschauer*in beitreten
-                  </h2>
-                  <div className="flex justify-center mb-4">
-                    <QRCodeSVG 
-                      value={getGameLink()} 
-                      size={256}
-                      level="H"
-                      includeMargin={true}
-                    />
-                  </div>
-                  <p className="text-center text-sm text-gray-600 mb-2">
-                    Oder verwende den Kurz-Code:
-                  </p>
-                  <p className="text-center text-3xl font-bold text-purple-600 mb-4">
-                    {getShortGameId()}
-                  </p>
-                  <button
-                    onClick={() => setShowQRCode(false)}
-                    className="w-full bg-gray-200 text-gray-800 py-3 rounded-lg font-semibold hover:bg-gray-300 transition"
-                  >
-                    Schließen
-                  </button>
+          {/* Einstellungen (nur Host) */}
+          {isHost && (
+            <div className="bg-white rounded-2xl shadow-xl p-6">
+              <h2 className="text-lg font-bold text-gray-800 mb-4">Einstellungen</h2>
+              <div className="space-y-4">
+                <div>
+                  <label className="flex justify-between text-sm font-medium text-gray-600 mb-1">
+                    <span>Prompt-Zeit</span>
+                    <span className="font-bold text-purple-600">{settings.promptTime}s</span>
+                  </label>
+                  <input type="range" min="30" max="300" step="30" value={settings.promptTime}
+                    onChange={(e) => updateSettings({ promptTime: parseInt(e.target.value) })}
+                    className="w-full accent-purple-600" />
+                </div>
+                <div>
+                  <label className="flex justify-between text-sm font-medium text-gray-600 mb-1">
+                    <span>Voting-Zeit</span>
+                    <span className="font-bold text-purple-600">{settings.votingTime}s</span>
+                  </label>
+                  <input type="range" min="15" max="60" step="5" value={settings.votingTime}
+                    onChange={(e) => updateSettings({ votingTime: parseInt(e.target.value) })}
+                    className="w-full accent-purple-600" />
                 </div>
               </div>
-            )}
-          </div>
+            </div>
+          )}
+
+          {/* Start Button */}
+          {isHost && (
+            <button
+              onClick={startGame}
+              disabled={playersList.length < 2}
+              className="w-full bg-gradient-to-r from-green-500 to-emerald-600 text-white py-4 rounded-2xl font-black text-xl shadow-xl hover:opacity-90 disabled:opacity-40 transition"
+            >
+              {playersList.length < 2 ? 'Mindestens 2 Spielerinnen nötig' : 'Spiel starten!'}
+            </button>
+          )}
+
+          {!isHost && (
+            <div className="text-center text-white/80 text-sm py-4">
+              Warten auf Spielstart durch die Spielleiterin...
+            </div>
+          )}
         </div>
       </div>
     );
   }
 
-  // Voting Phase
-  if (phase === 'voting') {
-    const playersList = Object.values(players);
-
+  // ─── Creating Phase ────────────────────────────────────────────────────────
+  if (phase === 'creating') {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-green-500 to-blue-600 p-4">
-        <div className="max-w-6xl mx-auto">
-          <div className="bg-white rounded-2xl shadow-2xl p-8">
-            <div className="flex justify-between items-center mb-8">
-              <h1 className="text-3xl font-bold text-gray-800">
-                ⭐ Zeit zum Bewerten!
-              </h1>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => setShowQRCode(true)}
-                  className="bg-green-500 text-white px-3 py-2 rounded-lg hover:bg-green-600 transition text-sm"
-                >
-                  📱 QR
-                </button>
-                <div className="text-2xl font-bold text-green-600">
-                  {formatTime(timeRemaining)}
-                </div>
-              </div>
+      <div className="min-h-screen bg-gradient-to-br from-blue-600 to-indigo-700 p-4">
+        <div className="max-w-5xl mx-auto space-y-4">
+
+          {/* Header + Timer */}
+          <div className="bg-white rounded-2xl shadow-xl p-4 flex justify-between items-center">
+            <div>
+              <h1 className="text-2xl font-black text-gray-800">Prompt erstellen</h1>
+              <p className="text-gray-500 text-sm">Beschreibe dein Bild</p>
             </div>
-
-            {/* Zeige Challenge */}
-            {challenge && (
-              <div className="mb-6 p-4 bg-gradient-to-r from-green-100 to-blue-100 rounded-lg border-2 border-green-300">
-                <div className="font-bold text-green-600 mb-2">📋 Aufgabe:</div>
-                <div className="text-gray-800 text-lg">{challenge}</div>
-              </div>
-            )}
-
-            {!hasVoted ? (
-              <>
-                <div className="mb-6 p-4 bg-blue-50 rounded-lg">
-                  <p className="text-center text-lg text-gray-700 mb-2">
-                    <strong>Bewerte ALLE {Object.keys(players).length} Bilder</strong> in 3 Kategorien (1-5 Sterne):
-                  </p>
-                  <p className="text-center text-sm text-purple-600 font-semibold mb-3">
-                    ✅ {ratedPlayers.size} / {Object.keys(players).length} Bilder bewertet
-                  </p>
-                  <div className="grid grid-cols-3 gap-4 text-center text-sm">
-                    <div>
-                      <strong>🎨 Vielfalt</strong>
-                      <p className="text-xs text-gray-600">Verschiedene Elemente</p>
-                    </div>
-                    <div>
-                      <strong>🎯 Treffend (x2)</strong>
-                      <p className="text-xs text-gray-600">Passt zur Aufgabe</p>
-                    </div>
-                    <div>
-                      <strong>💭 Phantasie</strong>
-                      <p className="text-xs text-gray-600">Kreativ & originell</p>
-                    </div>
-                </div>
-              </div>
-
-              {/* Reminder nach Bewertung */}
-              {showRatingReminder && ratedPlayers.size < Object.keys(players).length && (
-                <div className="mb-4 p-4 bg-orange-100 border-2 border-orange-400 rounded-lg animate-pulse">
-                  <p className="text-center text-lg font-bold text-orange-700">
-                    ⚠️ Nicht vergessen!
-                  </p>
-                  <p className="text-center text-orange-600">
-                    Du musst noch <strong>{Object.keys(players).length - ratedPlayers.size}</strong> weitere{Object.keys(players).length - ratedPlayers.size === 1 ? 's' : ''} Bild{Object.keys(players).length - ratedPlayers.size === 1 ? '' : 'er'} bewerten!
-                  </p>
-                </div>
-              )}
-              </>
-            ) : (
-              <p className="text-center text-lg mb-6 text-green-600 font-semibold">
-                ✅ Danke für deine Bewertung!
-              </p>
-            )}
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {playersList.map((player, index) => {
-                const isCurrentRating = currentRatingPlayer === player.id;
-                const isAlreadyRated = ratedPlayers.has(player.id);
-                
-                return (
-                  <div
-                    key={player.id}
-                    className={`p-4 rounded-lg transition-all ${
-                      hasVoted
-                        ? 'bg-gray-100'
-                        : isAlreadyRated
-                        ? 'bg-gradient-to-br from-green-100 to-emerald-100 border-2 border-green-500'
-                        : isCurrentRating
-                        ? 'bg-gradient-to-br from-purple-100 to-blue-100 border-2 border-purple-500'
-                        : 'bg-gradient-to-br from-green-50 to-blue-50 hover:shadow-xl'
-                    }`}
-                  >
-                    <div className="flex justify-between items-center mb-2">
-                      <div className="font-bold text-lg text-gray-800">
-                        Bild {String.fromCharCode(65 + index)}
-                      </div>
-                      {isAlreadyRated && (
-                        <div className="bg-green-600 text-white px-2 py-1 rounded text-xs font-bold">
-                          ✓ Bewertet
-                        </div>
-                      )}
-                    </div>
-                    
-                    {player.imageUrl ? (
-                      <img
-                        src={player.imageUrl}
-                        alt={`Image ${index + 1}`}
-                        className="w-full h-64 object-cover rounded-lg mb-3"
-                      />
-                    ) : (
-                      <div className="w-full h-64 bg-gray-200 rounded-lg flex items-center justify-center text-gray-500 mb-3">
-                        Kein Bild
-                      </div>
-                    )}
-
-                    {!hasVoted && (
-                      <>
-                        {!isCurrentRating ? (
-                          <button
-                            onClick={() => setCurrentRatingPlayer(player.id)}
-                            className="w-full bg-green-600 text-white py-2 rounded-lg font-semibold hover:bg-green-700 transition"
-                          >
-                            Bewerten
-                          </button>
-                        ) : (
-                          <div className="space-y-3">
-                            {/* Vielfalt */}
-                            <div>
-                              <label className="text-xs font-semibold text-gray-700 block mb-1">
-                                🎨 Vielfalt
-                              </label>
-                              <div className="flex gap-1 justify-center">
-                                {[1, 2, 3, 4, 5].map((star) => (
-                                  <button
-                                    key={star}
-                                    onClick={() => setTempRatings({ ...tempRatings, vielfalt: star })}
-                                    className={`text-3xl transition-all hover:scale-110 ${
-                                      star <= tempRatings.vielfalt ? 'text-yellow-400 drop-shadow-lg' : 'text-gray-300 hover:text-yellow-200'
-                                    }`}
-                                  >
-                                    {star <= tempRatings.vielfalt ? '⭐' : '☆'}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-
-                            {/* Treffend */}
-                            <div>
-                              <label className="text-xs font-semibold text-gray-700 block mb-1">
-                                🎯 Treffend (zählt doppelt!)
-                              </label>
-                              <div className="flex gap-1 justify-center">
-                                {[1, 2, 3, 4, 5].map((star) => (
-                                  <button
-                                    key={star}
-                                    onClick={() => setTempRatings({ ...tempRatings, treffend: star })}
-                                    className={`text-3xl transition-all hover:scale-110 ${
-                                      star <= tempRatings.treffend ? 'text-yellow-400 drop-shadow-lg' : 'text-gray-300 hover:text-yellow-200'
-                                    }`}
-                                  >
-                                    {star <= tempRatings.treffend ? '⭐' : '☆'}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-
-                            {/* Phantasie */}
-                            <div>
-                              <label className="text-xs font-semibold text-gray-700 block mb-1">
-                                💭 Phantasie
-                              </label>
-                              <div className="flex gap-1 justify-center">
-                                {[1, 2, 3, 4, 5].map((star) => (
-                                  <button
-                                    key={star}
-                                    onClick={() => setTempRatings({ ...tempRatings, phantasie: star })}
-                                    className={`text-3xl transition-all hover:scale-110 ${
-                                      star <= tempRatings.phantasie ? 'text-yellow-400 drop-shadow-lg' : 'text-gray-300 hover:text-yellow-200'
-                                    }`}
-                                  >
-                                    {star <= tempRatings.phantasie ? '⭐' : '☆'}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-
-                            <div className="pt-2 border-t border-gray-200">
-                              <p className="text-xs text-center text-gray-600 mb-2">
-                                Gesamt: {tempRatings.vielfalt + (tempRatings.treffend * 2) + tempRatings.phantasie} Punkte
-                              </p>
-                              <div className="flex gap-2">
-                                <button
-                                  onClick={() => {
-                                    setCurrentRatingPlayer(null);
-                                    setTempRatings({ vielfalt: 0, treffend: 0, phantasie: 0 });
-                                  }}
-                                  className="flex-1 bg-gray-400 text-white py-2 rounded-lg font-semibold hover:bg-gray-500 transition text-sm"
-                                >
-                                  Abbrechen
-                                </button>
-                                <button
-                                  onClick={() => submitRating(player.id)}
-                                  disabled={tempRatings.vielfalt === 0 || tempRatings.treffend === 0 || tempRatings.phantasie === 0}
-                                  className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-semibold hover:bg-blue-700 disabled:bg-gray-400 transition text-sm"
-                                >
-                                  Abschicken
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                );
-              })}
+            <div className={`text-4xl font-black ${timeRemaining <= 10 ? 'text-red-500' : 'text-blue-600'}`}>
+              {formatTime(timeRemaining)}
             </div>
-
-            {/* QR-Code Modal */}
-            {showQRCode && (
-              <div 
-                className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-                onClick={() => setShowQRCode(false)}
-              >
-                <div 
-                  className="bg-white rounded-2xl p-8 max-w-md"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <h2 className="text-2xl font-bold text-center mb-4 text-gray-800">
-                    📱 Als Zuschauer*in beitreten
-                  </h2>
-                  <div className="flex justify-center mb-4">
-                    <QRCodeSVG 
-                      value={getGameLink()} 
-                      size={256}
-                      level="H"
-                      includeMargin={true}
-                    />
-                  </div>
-                  <p className="text-center text-sm text-gray-600 mb-2">
-                    Oder verwende den Kurz-Code:
-                  </p>
-                  <p className="text-center text-3xl font-bold text-green-600 mb-4">
-                    {getShortGameId()}
-                  </p>
-                  <button
-                    onClick={() => setShowQRCode(false)}
-                    className="w-full bg-gray-200 text-gray-800 py-3 rounded-lg font-semibold hover:bg-gray-300 transition"
-                  >
-                    Schließen
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
-        </div>
-      </div>
-    );
-  }
 
-  // Results Phase
-  if (phase === 'results') {
-    const playersList = Object.values(players).sort((a, b) => b.votes - a.votes);
-    
-    // Berechne Ränge mit Gleichstand
-    const playersWithRank = playersList.map((player, index) => {
-      let rank = 1;
-      for (let i = 0; i < index; i++) {
-        if (playersList[i].votes > player.votes) {
-          rank++;
-        }
-      }
-      return { ...player, rank };
-    });
-
-    const winners = playersWithRank.filter(p => p.rank === 1);
-    const maxVotes = playersList[0]?.votes || 0;
-
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-yellow-400 to-orange-500 p-4">
-        <div className="max-w-6xl mx-auto">
-          <div className="bg-white rounded-2xl shadow-2xl p-8">
-            <h1 className="text-4xl font-bold text-center mb-4 text-gray-800">
-              🏆 Ergebnisse
-            </h1>
-
-            {/* Zeige Challenge */}
-            {challenge && (
-              <div className="mb-6 p-4 bg-gradient-to-r from-purple-100 to-blue-100 rounded-lg text-center">
-                <div className="font-bold text-purple-600 mb-2">📋 Aufgabe war:</div>
-                <div className="text-gray-800">{challenge}</div>
-              </div>
-            )}
-
-            <div className="mb-8 p-6 bg-gradient-to-r from-yellow-100 to-orange-100 rounded-lg text-center">
-              {winners.length === 1 ? (
-                <>
-                  <h2 className="text-3xl font-bold text-gray-800 mb-2">
-                    Gewinner: {winners[0].name}! 🎉
-                  </h2>
-                  <p className="text-xl text-gray-700">mit {winners[0].votes} Stimmen</p>
-                </>
-              ) : (
-                <>
-                  <h2 className="text-3xl font-bold text-gray-800 mb-2">
-                    🤝 Gleichstand!
-                  </h2>
-                  <p className="text-xl text-gray-700 mb-2">
-                    {winners.map(w => w.name).join(', ')}
-                  </p>
-                  <p className="text-lg text-gray-600">jeweils mit {maxVotes} Stimmen</p>
-                </>
-              )}
+          {/* Thema */}
+          {globalTopic && (
+            <div className="bg-white rounded-2xl shadow-xl p-4">
+              <div className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-1">Thema</div>
+              <p className="text-gray-800 font-semibold text-base">{globalTopic}</p>
             </div>
+          )}
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-              {playersWithRank.map((player) => {
-                const medals = ['🥇', '🥈', '🥉'];
-                const medal = player.rank <= 3 ? medals[player.rank - 1] : '';
-                
-                return (
-                  <div
-                    key={player.id}
-                    className={`p-4 rounded-lg ${
-                      player.rank === 1
-                        ? 'bg-gradient-to-br from-yellow-200 to-orange-200'
-                        : player.rank === 2
-                        ? 'bg-gradient-to-br from-gray-200 to-gray-300'
-                        : player.rank === 3
-                        ? 'bg-gradient-to-br from-orange-100 to-orange-200'
-                        : 'bg-gray-100'
-                    }`}
-                  >
-                    <div className="flex justify-between items-center mb-2">
-                      <div className="font-bold text-lg text-gray-800">
-                        {medal && `${medal} `}
-                        {player.name}
-                      </div>
-                      <div className="font-bold text-xl text-gray-700">
-                        {player.votes} 🗳️
-                      </div>
-                    </div>
-
-                    <div className="text-center text-sm font-semibold text-gray-600 mb-3">
-                      Platz {player.rank}
-                    </div>
-
-                    {/* Detaillierte Bewertungen */}
-                    <div className="mb-3 p-3 bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg text-xs space-y-1">
-                      <div className="flex justify-between">
-                        <span>🎨 Vielfalt:</span>
-                        <span className="font-bold">{player.vielfalt || 0} ⭐</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>🎯 Treffend:</span>
-                        <span className="font-bold">{player.treffend || 0} ⭐ (x2 = {(player.treffend || 0) * 2})</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>💭 Phantasie:</span>
-                        <span className="font-bold">{player.phantasie || 0} ⭐</span>
-                      </div>
-                      <div className="border-t border-gray-300 mt-2 pt-2 flex justify-between font-bold text-purple-700">
-                        <span>Gesamt:</span>
-                        <span>{player.votes} Punkte</span>
-                      </div>
-                    </div>
-
-                    <div className="mb-2 p-2 bg-white rounded text-sm text-gray-700 break-words">
-                      <strong>Prompt:</strong> {player.prompt || 'Kein Prompt'}
-                    </div>
-
-                    {player.imageUrl && (
-                      <img
-                        src={player.imageUrl}
-                        alt={`${player.name}'s creation`}
-                        className="w-full h-64 object-cover rounded-lg"
-                      />
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            {role === 'player' && (
+          {/* Prompt-Eingabe (nur Spielerinnen) */}
+          {isPlayer && (
+            <div className="bg-white rounded-2xl shadow-xl p-6">
+              <label className="block text-sm font-semibold text-gray-600 mb-2">
+                Dein Prompt (geheim – nur du siehst ihn jetzt)
+              </label>
+              <textarea
+                value={myPrompt}
+                onChange={(e) => setMyPrompt(e.target.value)}
+                placeholder="Beschreibe das Bild, das du dir vorstellst..."
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-blue-500 focus:outline-none text-gray-800 h-28 resize-none"
+                disabled={isGenerating}
+              />
               <button
-                onClick={resetGame}
-                className="w-full bg-blue-600 text-white py-4 rounded-lg font-bold text-lg hover:bg-blue-700 transition"
+                onClick={generateImage}
+                disabled={isGenerating || !myPrompt.trim()}
+                className="mt-3 w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-xl font-bold hover:opacity-90 disabled:opacity-40 transition shadow"
               >
-                Neues Spiel starten
+                {isGenerating ? 'Generiere Bild...' : 'Bild generieren'}
               </button>
-            )}
+              {myPlayer?.imageUrl && (
+                <div className="mt-4">
+                  <div className="text-xs text-green-600 font-semibold mb-2">Bild generiert!</div>
+                  <img src={myPlayer.imageUrl} alt="Dein Bild" className="w-full rounded-xl object-cover h-64" />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Übersicht Bilder */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {playersList.map((p) => (
+              <div key={p.id} className="bg-white rounded-2xl shadow-xl p-4">
+                <div className="flex justify-between items-center mb-2">
+                  <div className="font-bold text-gray-800">{p.role === 'host' ? '👑' : '⚔️'} {p.name}</div>
+                  {p.id === myPlayerId && <span className="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full">Du</span>}
+                </div>
+                {p.imageUrl ? (
+                  <img src={p.imageUrl} alt={p.name} className="w-full h-48 object-cover rounded-xl" />
+                ) : (
+                  <div className="w-full h-48 bg-gray-100 rounded-xl flex items-center justify-center">
+                    <span className="text-gray-400 text-sm">Noch kein Bild...</span>
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
+
+          {myRole === 'spectator' && (
+            <div className="text-center text-white/80 text-sm py-2">
+              Du schaust zu – die Spielerinnen erstellen gerade ihre Bilder.
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Voting Phase ──────────────────────────────────────────────────────────
+  if (phase === 'voting') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-green-500 to-teal-600 p-4">
+        <div className="max-w-5xl mx-auto space-y-4">
+
+          {/* Header */}
+          <div className="bg-white rounded-2xl shadow-xl p-4 flex justify-between items-center">
+            <div>
+              <h1 className="text-2xl font-black text-gray-800">Abstimmung</h1>
+              <p className="text-gray-500 text-sm">
+                {myRole === 'spectator'
+                  ? hasVoted ? 'Danke für deine Stimme!' : 'Wähle dein Lieblingsbild!'
+                  : 'Nur Zuschauerinnen stimmen ab'}
+              </p>
+            </div>
+            <div className={`text-4xl font-black ${timeRemaining <= 10 ? 'text-red-500' : 'text-green-600'}`}>
+              {formatTime(timeRemaining)}
+            </div>
+          </div>
+
+          {/* Bilder zum Voten */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {playersList.map((p, i) => (
+              <div
+                key={p.id}
+                onClick={() => myRole === 'spectator' && !hasVoted && vote(p.id)}
+                className={`bg-white rounded-2xl shadow-xl p-4 transition-all ${
+                  myRole === 'spectator' && !hasVoted
+                    ? 'cursor-pointer hover:ring-4 hover:ring-green-400 hover:shadow-2xl'
+                    : ''
+                }`}
+              >
+                <div className="font-bold text-gray-600 mb-2 text-sm">
+                  Bild {String.fromCharCode(65 + i)}
+                </div>
+                {p.imageUrl ? (
+                  <img src={p.imageUrl} alt={`Bild ${i + 1}`} className="w-full h-56 object-cover rounded-xl mb-3" />
+                ) : (
+                  <div className="w-full h-56 bg-gray-100 rounded-xl flex items-center justify-center mb-3">
+                    <span className="text-gray-400">Kein Bild</span>
+                  </div>
+                )}
+                <div className="text-center">
+                  <div className="text-xl font-black text-gray-800">{p.votes} Stimmen</div>
+                  {myRole === 'spectator' && !hasVoted && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); vote(p.id); }}
+                      className="mt-2 bg-green-500 text-white px-6 py-2 rounded-full font-bold hover:bg-green-600 transition"
+                    >
+                      Abstimmen
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {hasVoted && (
+            <div className="text-center text-white text-lg font-bold py-2">
+              Deine Stimme wurde gezählt!
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Results Phase ─────────────────────────────────────────────────────────
+  if (phase === 'results') {
+    const sorted = [...playersList].sort((a, b) => b.votes - a.votes);
+    const maxVotes = sorted[0]?.votes || 0;
+    const winners = sorted.filter((p) => p.votes === maxVotes && maxVotes > 0);
+    const medals = ['🥇', '🥈', '🥉'];
+
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-yellow-400 via-orange-400 to-pink-500 p-4">
+        <div className="max-w-5xl mx-auto space-y-4">
+
+          {/* Sieger-Headline */}
+          <div className="bg-white rounded-2xl shadow-xl p-8 text-center">
+            <div className="text-6xl mb-3">{winners.length === 1 ? '🏆' : '🤝'}</div>
+            <h1 className="text-4xl font-black text-gray-800 mb-2">
+              {winners.length === 1 ? `${winners[0].name} gewinnt!` : 'Gleichstand!'}
+            </h1>
+            {winners.length > 1 && (
+              <p className="text-xl text-gray-600">{winners.map((w) => w.name).join(' & ')}</p>
+            )}
+            <p className="text-gray-500 mt-1">{maxVotes > 0 ? `${maxVotes} Stimmen` : 'Keine Stimmen'}</p>
+          </div>
+
+          {/* Thema */}
+          {globalTopic && (
+            <div className="bg-white rounded-2xl shadow-xl p-4 text-center">
+              <div className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-1">Thema war</div>
+              <p className="text-gray-700 font-semibold">{globalTopic}</p>
+            </div>
+          )}
+
+          {/* Rangliste */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {sorted.map((p, i) => {
+              const isWinner = p.votes === maxVotes && maxVotes > 0;
+              return (
+                <div
+                  key={p.id}
+                  className={`bg-white rounded-2xl shadow-xl p-4 ${
+                    isWinner ? 'ring-4 ring-yellow-400' : ''
+                  }`}
+                >
+                  <div className="flex justify-between items-center mb-3">
+                    <div className="font-black text-2xl">{i < 3 ? medals[i] : `#${i + 1}`}</div>
+                    <div className="font-black text-xl text-gray-800">{p.votes} Stimmen</div>
+                  </div>
+                  <div className="font-bold text-gray-800 mb-2">{p.name}</div>
+                  {p.imageUrl && (
+                    <img src={p.imageUrl} alt={p.name} className="w-full h-48 object-cover rounded-xl mb-3" />
+                  )}
+                  <div className="p-3 bg-gray-50 rounded-lg">
+                    <div className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-1">Prompt</div>
+                    <p className="text-gray-700 text-sm">{p.prompt || '—'}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {isHost && (
+            <button
+              onClick={resetGame}
+              className="w-full bg-white text-purple-700 py-4 rounded-2xl font-black text-xl shadow-xl hover:bg-purple-50 transition"
+            >
+              Neues Spiel starten
+            </button>
+          )}
         </div>
       </div>
     );
