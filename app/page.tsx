@@ -32,6 +32,17 @@ interface GameState {
   startTime: number;
   challenge?: string;
   category?: string;
+  shortCode?: string;
+}
+
+// ─── Kurz-Code generieren: 3 Buchstaben + 2 Zahlen (z.B. "ABK42") ───────────
+function generateShortCode(): string {
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // ohne I und O (verwechslungsgefahr)
+  const digits = '23456789'; // ohne 0 und 1
+  let code = '';
+  for (let i = 0; i < 3; i++) code += letters[Math.floor(Math.random() * letters.length)];
+  for (let i = 0; i < 2; i++) code += digits[Math.floor(Math.random() * digits.length)];
+  return code;
 }
 
 // ─── Themen pro Kategorie ────────────────────────────────────────────────────
@@ -87,6 +98,7 @@ export default function Home() {
   });
   const [isGenerating, setIsGenerating] = useState(false);
   const [joinGameId, setJoinGameId] = useState('');
+  const [shortCode, setShortCode] = useState('');
   const [challenge, setChallenge] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('');
   const [currentRatingPlayer, setCurrentRatingPlayer] = useState<string | null>(null);
@@ -133,6 +145,7 @@ export default function Home() {
         setTimeRemaining(data.timeRemaining || 0);
         if (data.challenge) setChallenge(data.challenge);
         if (data.category) setSelectedCategory(data.category);
+        if (data.shortCode) setShortCode(data.shortCode);
       }
     });
 
@@ -203,6 +216,7 @@ export default function Home() {
   const createNewGame = async () => {
     const newGameRef = push(ref(database, 'games'));
     const newGameId = newGameRef.key!;
+    const code = generateShortCode();
 
     const initialState: GameState = {
       phase: 'lobby',
@@ -210,10 +224,12 @@ export default function Home() {
       settings: { promptTime: 180, votingTime: 90 },
       timeRemaining: 0,
       startTime: Date.now(),
+      shortCode: code,
     };
 
     await set(newGameRef, initialState);
     setGameId(newGameId);
+    setShortCode(code);
 
     return newGameId;
   };
@@ -227,6 +243,19 @@ export default function Home() {
       return true;
     }
     return false;
+  };
+
+  // Spiel per Kurz-Code (z.B. "ABK42") suchen
+  const findGameByShortCode = async (code: string): Promise<string | null> => {
+    const snap = await get(ref(database, 'games'));
+    if (!snap.exists()) return null;
+    let found: string | null = null;
+    snap.forEach((child) => {
+      if (child.val()?.shortCode === code.toUpperCase()) {
+        found = child.key;
+      }
+    });
+    return found;
   };
 
   const joinAsPlayer = async (existingGameId?: string) => {
@@ -423,13 +452,13 @@ export default function Home() {
 
   // ─── Kleine Beitritts-Leiste (für alle Spielphasen) ──────────────────────
   const JoinBar = () => (
-    <div className="flex items-center gap-4 p-3 bg-white/90 border border-purple-200 rounded-xl shadow mb-4">
+    <div className="flex items-center gap-4 p-3 bg-white/95 border-2 border-purple-200 rounded-xl shadow mb-4">
       <div className="flex-shrink-0">
-        <QRCodeSVG value={getGameLink()} size={64} level="H" includeMargin={false} />
+        <QRCodeSVG value={getGameLink()} size={72} level="H" includeMargin={false} />
       </div>
       <div className="flex flex-col gap-0.5 flex-1 min-w-0">
-        <span className="text-xs text-gray-500">Jetzt beitreten: <strong className="text-purple-700">promptbattle.vercel.app</strong></span>
-        <span className="text-2xl font-black tracking-widest text-purple-700 leading-tight">{getShortGameId()}</span>
+        <span className="text-sm font-bold text-purple-700">promptbattle-nine.vercel.app</span>
+        <span className="text-xl font-black tracking-widest text-purple-900 leading-tight">{getDisplayCode()}</span>
         <span className="text-xs text-gray-400">Zuschauerinnen können jederzeit beitreten</span>
       </div>
     </div>
@@ -442,12 +471,10 @@ export default function Home() {
   };
 
   const getGameLink = () => {
-    return `${window.location.origin}?game=${gameId}`;
+    return `https://promptbattle-nine.vercel.app?game=${gameId}`;
   };
 
-  const getShortGameId = () => {
-    return gameId.slice(-8).toUpperCase();
-  };
+  const getDisplayCode = () => shortCode || '…';
 
   const copyGameLink = () => {
     const link = getGameLink();
@@ -483,8 +510,8 @@ export default function Home() {
             <h1 className="text-4xl font-bold text-center mb-4 text-gray-800">
               🎮 Du wurdest eingeladen!
             </h1>
-            <p className="text-center text-gray-600 mb-8">
-              Game ID: <code className="bg-gray-100 px-2 py-1 rounded">{displayGameId}</code>
+            <p className="text-center text-gray-500 mb-8 text-sm">
+              Du trittst einem laufenden Spiel bei
             </p>
 
             <div className="space-y-4">
@@ -574,23 +601,24 @@ export default function Home() {
             <input
               type="text"
               value={joinGameId}
-              onChange={(e) => setJoinGameId(e.target.value)}
-              placeholder="Game-ID eingeben"
-              className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none text-gray-800"
+              onChange={(e) => setJoinGameId(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5))}
+              placeholder="Code (z.B. ABK42)"
+              className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none text-gray-800 text-center text-2xl font-black tracking-widest uppercase"
+              maxLength={5}
             />
 
             <button
               onClick={async () => {
                 if (joinGameId.trim() && playerName.trim()) {
-                  const success = await joinGame(joinGameId);
-                  if (success) {
-                    await joinAsPlayer(joinGameId);
+                  const gId = await findGameByShortCode(joinGameId);
+                  if (gId) {
+                    await joinAsPlayer(gId);
                   } else {
-                    alert('Spiel nicht gefunden!');
+                    alert('Spiel nicht gefunden! Prüfe den Code.');
                   }
                 }
               }}
-              disabled={!joinGameId.trim() || !playerName.trim()}
+              disabled={joinGameId.length < 5 || !playerName.trim()}
               className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 disabled:bg-gray-400 transition"
             >
               Spiel beitreten (als Mitstreiterin)
@@ -599,15 +627,15 @@ export default function Home() {
             <button
               onClick={async () => {
                 if (joinGameId.trim()) {
-                  const success = await joinGame(joinGameId);
-                  if (success) {
-                    await joinAsSpectator(joinGameId);
+                  const gId = await findGameByShortCode(joinGameId);
+                  if (gId) {
+                    await joinAsSpectator(gId);
                   } else {
-                    alert('Spiel nicht gefunden!');
+                    alert('Spiel nicht gefunden! Prüfe den Code.');
                   }
                 }
               }}
-              disabled={!joinGameId.trim()}
+              disabled={joinGameId.length < 5}
               className="w-full bg-teal-600 text-white py-3 rounded-lg font-semibold hover:bg-teal-700 disabled:bg-gray-400 transition"
             >
               Spiel beitreten (als Zuschauerin)
@@ -647,10 +675,10 @@ export default function Home() {
                   <p className="text-sm text-gray-500 mt-2">QR-Code scannen</p>
                 </div>
                 <div className="flex flex-col items-center gap-3">
-                  <p className="text-sm text-gray-500">oder Code eintippen auf</p>
-                  <p className="text-lg font-bold text-purple-700">promptbattle.vercel.app</p>
-                  <div className="bg-white border-4 border-purple-400 rounded-2xl px-10 py-5 shadow-md">
-                    <span className="text-6xl font-black tracking-widest text-purple-700">{getShortGameId()}</span>
+                  <p className="text-sm text-gray-500">Code eintippen auf</p>
+                  <p className="text-2xl font-black text-purple-700">promptbattle-nine.vercel.app</p>
+                  <div className="bg-white border-4 border-purple-400 rounded-2xl px-8 py-4 shadow-md">
+                    <span className="text-4xl font-black tracking-widest text-purple-700">{getDisplayCode()}</span>
                   </div>
                   <button
                     onClick={copyGameLink}
