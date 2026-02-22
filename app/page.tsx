@@ -273,15 +273,15 @@ export default function Home() {
   const startGame = async () => {
     if (Object.keys(players).length < 2) return;
 
-    // Thema automatisch zuteilen beim Start (aus gewählter Kategorie oder zufällig)
-    const catId = selectedCategory || categories[Math.floor(Math.random() * categories.length)].id;
-    const autoTopic = getRandomTopicForCategory(catId);
+    // Thema vollständig zufällig zuteilen
+    const allTopics = Object.values(CATEGORY_TOPICS).flat();
+    const autoTopic = allTopics[Math.floor(Math.random() * allTopics.length)];
 
     await update(ref(database, `games/${gameId}`), {
       phase: 'creating',
       timeRemaining: settings.promptTime,
       challenge: autoTopic,
-      category: catId,
+      category: '',
     });
   };
 
@@ -634,9 +634,9 @@ export default function Home() {
                 </div>
                 <div className="flex flex-col items-center gap-3">
                   <p className="text-sm text-gray-500">oder Code eintippen auf</p>
-                  <p className="text-base font-bold text-purple-700">promptbattle.vercel.app</p>
-                  <div className="bg-white border-4 border-purple-400 rounded-2xl px-8 py-4 shadow-md">
-                    <span className="text-5xl font-black tracking-widest text-purple-700">{getShortGameId()}</span>
+                  <p className="text-lg font-bold text-purple-700">promptbattle.vercel.app</p>
+                  <div className="bg-white border-4 border-purple-400 rounded-2xl px-10 py-5 shadow-md">
+                    <span className="text-6xl font-black tracking-widest text-purple-700">{getShortGameId()}</span>
                   </div>
                   <button
                     onClick={copyGameLink}
@@ -651,62 +651,17 @@ export default function Home() {
               </div>
             </div>
 
-            {role === 'player' && (
-              <div className="mb-8 p-6 bg-blue-50 rounded-lg">
-                <h2 className="text-xl font-semibold mb-4 text-gray-800">Spieleinstellungen</h2>
-
-                {/* Kategorie Auswahl – Thema wird automatisch zugeteilt */}
-                <div className="mb-6">
-                  <label className="block text-sm font-medium mb-2 text-gray-700">
-                    Kategorie wählen (optional) – Thema wird automatisch beim Start zugeteilt:
-                  </label>
-                  <div className="grid grid-cols-2 gap-3 mb-3">
-                    {categories.map((cat) => (
-                      <button
-                        key={cat.id}
-                        onClick={() => selectCategory(cat.id)}
-                        className={`p-3 rounded-lg border-2 transition text-left ${
-                          selectedCategory === cat.id
-                            ? 'border-purple-500 bg-purple-100'
-                            : 'border-gray-300 bg-white hover:border-purple-300'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="text-xl">{cat.emoji}</span>
-                          <div>
-                            <div className="font-bold text-gray-800 text-xs">{cat.name}</div>
-                            <div className="text-xs text-gray-500">{cat.description}</div>
-                          </div>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-
-                  {selectedCategory && !challenge && (
-                    <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-sm text-purple-700">
-                      ✅ Kategorie gewählt: <strong>{categories.find(c => c.id === selectedCategory)?.emoji} {categories.find(c => c.id === selectedCategory)?.name}</strong>
-                      <br/><span className="text-xs text-gray-500">Thema wird automatisch beim Spielstart zugeteilt</span>
-                    </div>
-                  )}
-                  {!selectedCategory && (
-                    <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-500">
-                      Keine Kategorie gewählt → zufällige Kategorie beim Start
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex gap-4">
-                  <div className="flex-1 p-3 bg-white border border-gray-200 rounded-lg text-center">
-                    <div className="text-xs text-gray-500 mb-1">⏱ Prompt-Zeit</div>
-                    <div className="text-2xl font-black text-purple-700">3:00</div>
-                  </div>
-                  <div className="flex-1 p-3 bg-white border border-gray-200 rounded-lg text-center">
-                    <div className="text-xs text-gray-500 mb-1">⭐ Bewertungs-Zeit</div>
-                    <div className="text-2xl font-black text-green-700">1:30</div>
-                  </div>
-                </div>
+            {/* Zeiten-Info */}
+            <div className="mb-6 flex gap-4">
+              <div className="flex-1 p-3 bg-purple-50 border border-purple-200 rounded-xl text-center">
+                <div className="text-xs text-gray-500 mb-1">⏱ Prompt-Zeit</div>
+                <div className="text-2xl font-black text-purple-700">3:00</div>
               </div>
-            )}
+              <div className="flex-1 p-3 bg-green-50 border border-green-200 rounded-xl text-center">
+                <div className="text-xs text-gray-500 mb-1">⭐ Bewertungs-Zeit</div>
+                <div className="text-2xl font-black text-green-700">1:30</div>
+              </div>
+            </div>
 
             {/* Teilnehmende */}
             <div className="mb-6">
