@@ -33,6 +33,7 @@ interface GameState {
   challenge?: string;
   category?: string;
   shortCode?: string;
+  spectatorCount?: number;
 }
 
 // ─── Kurz-Code generieren: 3 Buchstaben + 2 Zahlen (z.B. "ABK42") ───────────
@@ -43,43 +44,6 @@ function generateShortCode(): string {
   for (let i = 0; i < 3; i++) code += letters[Math.floor(Math.random() * letters.length)];
   for (let i = 0; i < 2; i++) code += digits[Math.floor(Math.random() * digits.length)];
   return code;
-}
-
-// ─── Themen pro Kategorie ────────────────────────────────────────────────────
-const CATEGORY_TOPICS: Record<string, string[]> = {
-  betrieb: [
-    'Ein Lernender erklärt einem Roboter, wie man eine Kaffeemaschine bedient',
-    'Das Büro der Zukunft – aber niemand weiss, wie man den Drucker benutzt',
-    'Eine Sitzung, in der alle gleichzeitig reden und niemand zuhört',
-    'Der erste Arbeitstag: alles ist neu, alle sind freundlich, aber wo ist die Toilette?',
-    'Ein Werkzeug, das plötzlich ein eigenes Leben hat',
-  ],
-  freizeit: [
-    'Eine Gruppe Jugendlicher versucht, ohne Handy einen Abend zu überstehen',
-    'Das perfekte Wochenende – aber das Wetter spielt nicht mit',
-    'Ein Konzert, bei dem alle im falschen Film sind',
-    'Eine Party, auf der alle gleichzeitig ein Selfie machen wollen',
-    'Gaming-Turnier: der Controller streikt im entscheidenden Moment',
-  ],
-  familie: [
-    'Sonntagsessen: drei Generationen, drei Meinungen, ein Tisch',
-    'Der Familienausflug, der niemand so wollte wie geplant',
-    'Grosseltern lernen ein neues Gerät kennen – mit Unterstützung der Enkelkinder',
-    'Wohnzimmer-Fernsehabend: alle wollen etwas anderes schauen',
-    'Der einzige ruhige Moment des Tages – um Mitternacht',
-  ],
-  jungsein: [
-    'Träume von der Zukunft – aber erst nach dem Schlafen',
-    'Zwischen Ausbildung, Freunde, Familie und Social Media: ein typischer Tag',
-    'Das erste eigene Zimmer: endlich Freiheit, aber auch Verantwortung',
-    'Wenn der Druck zu viel wird und man einfach mal Pause braucht',
-    'Ein Moment, der zeigt: jung sein ist schön und kompliziert zugleich',
-  ],
-};
-
-function getRandomTopicForCategory(categoryId: string): string {
-  const topics = CATEGORY_TOPICS[categoryId] || CATEGORY_TOPICS['jungsein'];
-  return topics[Math.floor(Math.random() * topics.length)];
 }
 
 export default function Home() {
@@ -97,6 +61,7 @@ export default function Home() {
     votingTime: 90,
   });
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isGeneratingChallenge, setIsGeneratingChallenge] = useState(false);
   const [joinGameId, setJoinGameId] = useState('');
   const [shortCode, setShortCode] = useState('');
   const [challenge, setChallenge] = useState('');
@@ -106,6 +71,8 @@ export default function Home() {
   const [ratedPlayers, setRatedPlayers] = useState<Set<string>>(new Set());
   const [totalGamesPlayed, setTotalGamesPlayed] = useState<number>(0);
   const [showRatingReminder, setShowRatingReminder] = useState(false);
+  const [spectatorCount, setSpectatorCount] = useState<number>(0);
+  const [mySpectatorId, setMySpectatorId] = useState<string>('');
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   const categories = [
@@ -146,6 +113,7 @@ export default function Home() {
         if (data.challenge) setChallenge(data.challenge);
         if (data.category) setSelectedCategory(data.category);
         if (data.shortCode) setShortCode(data.shortCode);
+        if (typeof data.spectatorCount === 'number') setSpectatorCount(data.spectatorCount);
       }
     });
 
@@ -225,6 +193,7 @@ export default function Home() {
       timeRemaining: 0,
       startTime: Date.now(),
       shortCode: code,
+      spectatorCount: 0,
     };
 
     await set(newGameRef, initialState);
@@ -240,9 +209,9 @@ export default function Home() {
 
     if (snapshot.exists()) {
       setGameId(gId);
-      return true;
+      return snapshot.val() as GameState;
     }
-    return false;
+    return null;
   };
 
   // Spiel per Kurz-Code (z.B. "ABK42") suchen
@@ -296,42 +265,90 @@ export default function Home() {
       gId = await createNewGame();
     }
     setGameId(gId);
+
+    // Spectator-Zähler erhöhen
+    const gameSnap = await get(ref(database, `games/${gId}`));
+    const currentCount = gameSnap.val()?.spectatorCount || 0;
+    await update(ref(database, `games/${gId}`), { spectatorCount: currentCount + 1 });
+
+    // Unique spectator ID für cleanup beim Verlassen
+    const specId = `spec_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    setMySpectatorId(specId);
     setRole('spectator');
   };
 
+  // Spectator-Zähler beim Verlassen (Tab schliessen / Browser verlassen) verringern
+  useEffect(() => {
+    if (!gameId || role !== 'spectator') return;
+
+    const handleUnload = async () => {
+      const gameSnap = await get(ref(database, `games/${gameId}`));
+      const currentCount = gameSnap.val()?.spectatorCount || 0;
+      if (currentCount > 0) {
+        await update(ref(database, `games/${gameId}`), { spectatorCount: currentCount - 1 });
+      }
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, [gameId, role]);
+
   const startGame = async () => {
     if (Object.keys(players).length < 2) return;
+    setIsGeneratingChallenge(true);
 
-    // Thema vollständig zufällig zuteilen
-    const allTopics = Object.values(CATEGORY_TOPICS).flat();
-    const autoTopic = allTopics[Math.floor(Math.random() * allTopics.length)];
+    try {
+      // Kategorie wählen: entweder ausgewählt, oder zufällig
+      const catIds = ['betrieb', 'freizeit', 'familie', 'jungsein'];
+      const cat = selectedCategory || catIds[Math.floor(Math.random() * catIds.length)];
 
-    await update(ref(database, `games/${gameId}`), {
-      phase: 'creating',
-      timeRemaining: settings.promptTime,
-      challenge: autoTopic,
-      category: '',
-    });
-  };
+      // Aufgabe via API generieren (wie in der Vorgängerversion)
+      const res = await fetch('/api/generate-challenge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: cat }),
+      });
+      const data = await res.json();
+      const autoChallenge = data.challenge || 'Erstellt ein kreatives Bild zum Thema des Tages!';
 
-  const updateSettings = async (newSettings: Partial<GameSettings>) => {
-    const updated = { ...settings, ...newSettings };
-    setSettings(updated);
+      await update(ref(database, `games/${gameId}`), {
+        phase: 'creating',
+        timeRemaining: settings.promptTime,
+        challenge: autoChallenge,
+        category: cat,
+      });
+    } catch (e) {
+      // Fallback falls API nicht erreichbar
+      const fallbacks: Record<string, string[]> = {
+        betrieb: ['Ein Lernender erklärt einem Roboter, wie man eine Kaffeemaschine bedient', 'Das Büro der Zukunft – aber niemand weiss, wie man den Drucker benutzt'],
+        freizeit: ['Eine Gruppe Jugendlicher versucht, ohne Handy einen Abend zu überstehen', 'Das perfekte Wochenende – aber das Wetter spielt nicht mit'],
+        familie: ['Sonntagsessen: drei Generationen, drei Meinungen, ein Tisch', 'Der Familienausflug, der niemand so wollte wie geplant'],
+        jungsein: ['Träume von der Zukunft – aber erst nach dem Schlafen', 'Zwischen Ausbildung, Freunde, Familie und Social Media: ein typischer Tag'],
+      };
+      const catIds = ['betrieb', 'freizeit', 'familie', 'jungsein'];
+      const cat = selectedCategory || catIds[Math.floor(Math.random() * catIds.length)];
+      const pool = fallbacks[cat] || fallbacks['jungsein'];
+      const fallback = pool[Math.floor(Math.random() * pool.length)];
 
-    if (gameId) {
-      await update(ref(database, `games/${gameId}/settings`), updated);
+      await update(ref(database, `games/${gameId}`), {
+        phase: 'creating',
+        timeRemaining: settings.promptTime,
+        challenge: fallback,
+        category: cat,
+      });
+    } finally {
+      setIsGeneratingChallenge(false);
     }
   };
 
-  // Nur Kategorie merken – Thema wird beim Spielstart automatisch gezogen
+  // Kategorie wählen in der Lobby (optional, vor Spielstart)
   const selectCategory = async (categoryId: string) => {
-    // Toggle: nochmal klicken hebt Auswahl auf
     const newCat = selectedCategory === categoryId ? '' : categoryId;
     setSelectedCategory(newCat);
-    setChallenge('');
     await update(ref(database, `games/${gameId}`), {
       category: newCat,
-      challenge: '',
     });
   };
 
@@ -450,20 +467,6 @@ export default function Home() {
     setRatedPlayers(new Set());
   };
 
-  // ─── Kleine Beitritts-Leiste (für alle Spielphasen) ──────────────────────
-  const JoinBar = () => (
-    <div className="flex items-center gap-4 p-3 bg-white/95 border-2 border-purple-200 rounded-xl shadow mb-4">
-      <div className="flex-shrink-0">
-        <QRCodeSVG value={getGameLink()} size={72} level="H" includeMargin={false} />
-      </div>
-      <div className="flex flex-col gap-0.5 flex-1 min-w-0">
-        <span className="text-sm font-bold text-purple-700">promptbattle-nine.vercel.app</span>
-        <span className="text-xl font-black tracking-widest text-purple-900 leading-tight">{getDisplayCode()}</span>
-        <span className="text-xs text-gray-400">Zuschauerinnen können jederzeit beitreten</span>
-      </div>
-    </div>
-  );
-
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -488,8 +491,8 @@ export default function Home() {
     const gameIdFromUrl = urlParams.get('game');
     if (gameIdFromUrl && !gameId && !role) {
       setJoinGameId(gameIdFromUrl);
-      joinGame(gameIdFromUrl).then((success) => {
-        if (success) {
+      joinGame(gameIdFromUrl).then((gameState) => {
+        if (gameState) {
           setGameId(gameIdFromUrl);
         }
       });
@@ -501,7 +504,7 @@ export default function Home() {
   // ═══════════════════════════════════════════════════════════════════════════
 
   if (!role) {
-    // Einladungslink-Screen
+    // Einladungslink-Screen (via URL ?game=...)
     if (gameId || joinGameId) {
       const displayGameId = gameId || joinGameId;
       return (
@@ -527,6 +530,12 @@ export default function Home() {
               <button
                 onClick={async () => {
                   if (playerName.trim()) {
+                    // Prüfen ob Spiel noch in der Lobby ist
+                    const gameState = await joinGame(displayGameId);
+                    if (gameState && gameState.phase !== 'lobby') {
+                      alert('Das Spiel läuft bereits! Beitritt nur in der Lobby möglich. Du kannst als Zuschauerin teilnehmen.');
+                      return;
+                    }
                     await joinAsPlayer(displayGameId);
                   }
                 }}
@@ -538,6 +547,12 @@ export default function Home() {
 
               <button
                 onClick={async () => {
+                  // Prüfen ob Spiel noch in der Lobby ist
+                  const gameState = await joinGame(displayGameId);
+                  if (gameState && gameState.phase !== 'lobby') {
+                    alert('Das Spiel läuft bereits! Beitritt als Zuschauerin ist nur in der Lobby möglich.');
+                    return;
+                  }
                   await joinAsSpectator(displayGameId);
                 }}
                 className="w-full bg-teal-600 text-white py-3 rounded-lg font-semibold hover:bg-teal-700 transition"
@@ -570,7 +585,6 @@ export default function Home() {
               type="text"
               value={playerName}
               onChange={(e) => setPlayerName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && playerName.trim() && (async () => { await createNewGame(); await joinAsPlayer(); })()}
               placeholder="Dein Name"
               className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none text-gray-800"
               maxLength={20}
@@ -612,6 +626,11 @@ export default function Home() {
                 if (joinGameId.trim() && playerName.trim()) {
                   const gId = await findGameByShortCode(joinGameId);
                   if (gId) {
+                    const gameState = await joinGame(gId);
+                    if (gameState && gameState.phase !== 'lobby') {
+                      alert('Das Spiel läuft bereits! Beitritt nur in der Lobby möglich.');
+                      return;
+                    }
                     await joinAsPlayer(gId);
                   } else {
                     alert('Spiel nicht gefunden! Prüfe den Code.');
@@ -629,6 +648,11 @@ export default function Home() {
                 if (joinGameId.trim()) {
                   const gId = await findGameByShortCode(joinGameId);
                   if (gId) {
+                    const gameState = await joinGame(gId);
+                    if (gameState && gameState.phase !== 'lobby') {
+                      alert('Das Spiel läuft bereits! Beitritt nur in der Lobby möglich.');
+                      return;
+                    }
                     await joinAsSpectator(gId);
                   } else {
                     alert('Spiel nicht gefunden! Prüfe den Code.');
@@ -656,8 +680,15 @@ export default function Home() {
           <div className="bg-white rounded-2xl shadow-2xl p-8">
             <div className="flex justify-between items-center mb-6">
               <h1 className="text-4xl font-bold text-gray-800">Lobby</h1>
-              <div className="text-sm text-gray-500">
-                {playersList.length} / 3 Teilnehmende
+              <div className="flex flex-col items-end gap-1">
+                <div className="text-sm text-gray-500">
+                  {playersList.length} / 3 Teilnehmende
+                </div>
+                {spectatorCount > 0 && (
+                  <div className="text-sm text-teal-600 font-medium">
+                    👁 {spectatorCount} Zuschauer{spectatorCount === 1 ? 'in' : 'innen'}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -687,7 +718,7 @@ export default function Home() {
                     📋 Link kopieren
                   </button>
                   <p className="text-xs text-gray-400 text-center">
-                    Zuschauerinnen können auch während des Spiels beitreten
+                    Beitritt nur in der Lobby möglich
                   </p>
                 </div>
               </div>
@@ -711,7 +742,6 @@ export default function Home() {
                 Mitstreiterinnen
               </h2>
               <div className="grid grid-cols-3 gap-3">
-                {/* Belegte Slots */}
                 {playersList.map((player) => (
                   <div
                     key={player.id}
@@ -724,7 +754,6 @@ export default function Home() {
                     )}
                   </div>
                 ))}
-                {/* Freie Slots */}
                 {Array.from({ length: Math.max(0, 3 - playersList.length) }).map((_, i) => (
                   <div
                     key={`empty-${i}`}
@@ -737,14 +766,52 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Start-Bereich */}
-            {role === 'player' && playersList.length >= 2 && (
+            {/* Kategorie-Auswahl (optional, vor Spielstart) */}
+            {playersList.length >= 2 && (
+              <div className="mb-6">
+                <h2 className="text-lg font-semibold mb-2 text-gray-700">
+                  Themenbereich wählen <span className="text-sm font-normal text-gray-400">(optional – oder zufällig)</span>
+                </h2>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {categories.map((cat) => (
+                    <button
+                      key={cat.id}
+                      onClick={() => selectCategory(cat.id)}
+                      className={`p-3 rounded-xl border-2 text-center transition-all ${
+                        selectedCategory === cat.id
+                          ? 'border-purple-500 bg-purple-100 shadow-md scale-105'
+                          : 'border-gray-200 bg-gray-50 hover:border-purple-300'
+                      }`}
+                    >
+                      <div className="text-3xl mb-1">{cat.emoji}</div>
+                      <div className="text-xs font-semibold text-gray-700">{cat.name}</div>
+                    </button>
+                  ))}
+                </div>
+                {selectedCategory && (
+                  <p className="text-sm text-center text-purple-600 mt-2 font-medium">
+                    ✓ Kategorie: {categories.find(c => c.id === selectedCategory)?.name}
+                  </p>
+                )}
+                {!selectedCategory && (
+                  <p className="text-sm text-center text-gray-400 mt-2">
+                    Keine Auswahl = zufällige Kategorie
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Start-Bereich – für Spieler UND Zuschauerinnen */}
+            {playersList.length >= 2 && (
               <div className="space-y-3">
                 <button
                   onClick={startGame}
-                  className="w-full bg-green-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-green-700 transition shadow"
+                  disabled={isGeneratingChallenge}
+                  className="w-full bg-green-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-green-700 disabled:bg-gray-400 transition shadow"
                 >
-                  ▶ Spiel starten! ({playersList.length} Teilnehmende)
+                  {isGeneratingChallenge
+                    ? '⏳ Aufgabe wird generiert...'
+                    : `▶ Spiel starten! (${playersList.length} Teilnehmende)`}
                 </button>
                 {playersList.length < 3 && (
                   <p className="text-center text-sm text-gray-500">
@@ -754,15 +821,9 @@ export default function Home() {
               </div>
             )}
 
-            {role === 'player' && playersList.length < 2 && (
+            {playersList.length < 2 && (
               <div className="text-center py-4 text-gray-500">
                 Warte auf mindestens eine weitere Mitstreiterin...
-              </div>
-            )}
-
-            {role === 'spectator' && (
-              <div className="text-center text-gray-600 py-4">
-                Warten auf Spielstart durch eine Mitstreiterin...
               </div>
             )}
           </div>
@@ -778,7 +839,7 @@ export default function Home() {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-500 to-purple-600 p-4">
         <div className="max-w-6xl mx-auto">
-          <JoinBar />
+          {/* Kein JoinBar mehr – Beitritt nur in der Lobby */}
           <div className="bg-white rounded-2xl shadow-2xl p-8">
             <div className="flex justify-between items-center mb-4">
               <h1 className="text-3xl font-bold text-gray-800">
@@ -793,9 +854,11 @@ export default function Home() {
               <div className="mb-6 p-4 bg-gradient-to-r from-purple-100 to-blue-100 rounded-lg border-2 border-purple-300">
                 <div className="font-bold text-purple-600 mb-2">📋 Aufgabe:</div>
                 <div className="text-gray-800 text-lg">{challenge}</div>
-                <div className="text-sm text-gray-600 mt-2">
-                  Kategorie: {categories.find(c => c.id === selectedCategory)?.emoji} {categories.find(c => c.id === selectedCategory)?.name}
-                </div>
+                {selectedCategory && (
+                  <div className="text-sm text-gray-600 mt-2">
+                    Kategorie: {categories.find(c => c.id === selectedCategory)?.emoji} {categories.find(c => c.id === selectedCategory)?.name}
+                  </div>
+                )}
               </div>
             )}
 
@@ -866,7 +929,7 @@ export default function Home() {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-500 to-blue-600 p-4">
         <div className="max-w-6xl mx-auto">
-          <JoinBar />
+          {/* Kein JoinBar mehr – Beitritt nur in der Lobby */}
           <div className="bg-white rounded-2xl shadow-2xl p-8">
             <div className="flex justify-between items-center mb-8">
               <h1 className="text-3xl font-bold text-gray-800">
@@ -1087,7 +1150,7 @@ export default function Home() {
     return (
       <div className="min-h-screen bg-gradient-to-br from-yellow-400 to-orange-500 p-4">
         <div className="max-w-6xl mx-auto">
-          <JoinBar />
+          {/* Kein JoinBar mehr – Beitritt nur in der Lobby */}
           <div className="bg-white rounded-2xl shadow-2xl p-8">
             <h1 className="text-4xl font-bold text-center mb-4 text-gray-800">
               🏆 Ergebnisse
