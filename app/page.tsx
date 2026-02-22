@@ -82,8 +82,8 @@ export default function Home() {
   const [timeRemaining, setTimeRemaining] = useState(0);
   const [hasVoted, setHasVoted] = useState(false);
   const [settings, setSettings] = useState<GameSettings>({
-    promptTime: 120,
-    votingTime: 55,
+    promptTime: 180,
+    votingTime: 90,
   });
   const [isGenerating, setIsGenerating] = useState(false);
   const [joinGameId, setJoinGameId] = useState('');
@@ -207,7 +207,7 @@ export default function Home() {
     const initialState: GameState = {
       phase: 'lobby',
       players: {},
-      settings: { promptTime: 120, votingTime: 55 },
+      settings: { promptTime: 180, votingTime: 90 },
       timeRemaining: 0,
       startTime: Date.now(),
     };
@@ -273,9 +273,15 @@ export default function Home() {
   const startGame = async () => {
     if (Object.keys(players).length < 2) return;
 
+    // Thema automatisch zuteilen beim Start (aus gewählter Kategorie oder zufällig)
+    const catId = selectedCategory || categories[Math.floor(Math.random() * categories.length)].id;
+    const autoTopic = getRandomTopicForCategory(catId);
+
     await update(ref(database, `games/${gameId}`), {
       phase: 'creating',
       timeRemaining: settings.promptTime,
+      challenge: autoTopic,
+      category: catId,
     });
   };
 
@@ -288,14 +294,15 @@ export default function Home() {
     }
   };
 
-  // Automatisch Thema generieren wenn Kategorie gewählt
+  // Nur Kategorie merken – Thema wird beim Spielstart automatisch gezogen
   const selectCategory = async (categoryId: string) => {
-    setSelectedCategory(categoryId);
-    const topic = getRandomTopicForCategory(categoryId);
-    setChallenge(topic);
+    // Toggle: nochmal klicken hebt Auswahl auf
+    const newCat = selectedCategory === categoryId ? '' : categoryId;
+    setSelectedCategory(newCat);
+    setChallenge('');
     await update(ref(database, `games/${gameId}`), {
-      challenge: topic,
-      category: categoryId,
+      category: newCat,
+      challenge: '',
     });
   };
 
@@ -607,37 +614,38 @@ export default function Home() {
           <div className="bg-white rounded-2xl shadow-2xl p-8">
             <div className="flex justify-between items-center mb-6">
               <h1 className="text-4xl font-bold text-gray-800">Lobby</h1>
-              <button
-                onClick={copyGameLink}
-                className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition text-sm"
-              >
-                📋 Link kopieren
-              </button>
+              <div className="text-sm text-gray-500">
+                {playersList.length} / 3 Teilnehmende
+              </div>
             </div>
 
-            {/* QR-Code + Code – immer sichtbar */}
-            <div className="mb-6 p-4 bg-gray-50 border border-gray-200 rounded-xl">
-              <p className="text-sm font-semibold text-gray-600 mb-3">Einladung teilen:</p>
-              <div className="flex flex-col md:flex-row gap-6 items-center">
-                <div className="flex-shrink-0">
+            {/* QR-Code + Code – immer sichtbar, gross */}
+            <div className="mb-6 p-6 bg-gradient-to-br from-purple-50 to-pink-50 border-2 border-purple-200 rounded-2xl">
+              <p className="text-base font-bold text-gray-700 mb-4 text-center">📱 Einladung teilen</p>
+              <div className="flex flex-col md:flex-row gap-8 items-center justify-center">
+                <div className="flex-shrink-0 flex flex-col items-center">
                   <QRCodeSVG
                     value={getGameLink()}
-                    size={140}
+                    size={180}
                     level="H"
                     includeMargin={true}
                   />
-                  <p className="text-xs text-center text-gray-500 mt-1">QR-Code scannen</p>
+                  <p className="text-sm text-gray-500 mt-2">QR-Code scannen</p>
                 </div>
-                <div className="flex-1 text-center md:text-left">
-                  <p className="text-xs text-gray-500 mb-1">Kurz-Code zum Eintippen:</p>
-                  <div className="inline-block bg-purple-100 border-2 border-purple-300 rounded-xl px-6 py-3 mb-2">
-                    <span className="text-3xl font-black tracking-widest text-purple-700">{getShortGameId()}</span>
+                <div className="flex flex-col items-center gap-3">
+                  <p className="text-sm text-gray-500">oder Code eintippen auf</p>
+                  <p className="text-base font-bold text-purple-700">promptbattle.vercel.app</p>
+                  <div className="bg-white border-4 border-purple-400 rounded-2xl px-8 py-4 shadow-md">
+                    <span className="text-5xl font-black tracking-widest text-purple-700">{getShortGameId()}</span>
                   </div>
-                  <p className="text-xs text-gray-500">
-                    → Auf <strong>promptbattle.vercel.app</strong> Game-ID eingeben
-                  </p>
-                  <p className="text-xs text-gray-400 mt-2">
-                    Zuschauerinnen können auch während des Spiels noch beitreten!
+                  <button
+                    onClick={copyGameLink}
+                    className="mt-1 bg-purple-600 text-white px-5 py-2 rounded-lg hover:bg-purple-700 transition text-sm font-semibold"
+                  >
+                    📋 Link kopieren
+                  </button>
+                  <p className="text-xs text-gray-400 text-center">
+                    Zuschauerinnen können auch während des Spiels beitreten
                   </p>
                 </div>
               </div>
@@ -649,119 +657,115 @@ export default function Home() {
 
                 {/* Kategorie Auswahl – Thema wird automatisch zugeteilt */}
                 <div className="mb-6">
-                  <label className="block text-sm font-medium mb-1 text-gray-700">
-                    Wähle eine Kategorie – Thema wird automatisch zugeteilt:
+                  <label className="block text-sm font-medium mb-2 text-gray-700">
+                    Kategorie wählen (optional) – Thema wird automatisch beim Start zugeteilt:
                   </label>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                  <div className="grid grid-cols-2 gap-3 mb-3">
                     {categories.map((cat) => (
                       <button
                         key={cat.id}
                         onClick={() => selectCategory(cat.id)}
-                        className={`p-4 rounded-lg border-2 transition text-left ${
+                        className={`p-3 rounded-lg border-2 transition text-left ${
                           selectedCategory === cat.id
                             ? 'border-purple-500 bg-purple-100'
                             : 'border-gray-300 bg-white hover:border-purple-300'
                         }`}
                       >
                         <div className="flex items-center gap-2">
-                          <span className="text-2xl">{cat.emoji}</span>
+                          <span className="text-xl">{cat.emoji}</span>
                           <div>
-                            <div className="font-bold text-gray-800 text-sm">{cat.name}</div>
-                            <div className="text-xs text-gray-600">{cat.description}</div>
+                            <div className="font-bold text-gray-800 text-xs">{cat.name}</div>
+                            <div className="text-xs text-gray-500">{cat.description}</div>
                           </div>
                         </div>
                       </button>
                     ))}
                   </div>
 
-                  {challenge && (
-                    <div className="p-4 bg-white rounded-lg border-2 border-purple-300">
-                      <div className="font-bold text-purple-600 mb-1 text-sm">📋 Zugeteiltes Thema:</div>
-                      <div className="text-gray-800">{challenge}</div>
-                      <button
-                        onClick={() => selectCategory(selectedCategory)}
-                        className="mt-2 text-xs text-purple-500 hover:text-purple-700 transition"
-                      >
-                        Anderes Thema ziehen
-                      </button>
+                  {selectedCategory && !challenge && (
+                    <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-sm text-purple-700">
+                      ✅ Kategorie gewählt: <strong>{categories.find(c => c.id === selectedCategory)?.emoji} {categories.find(c => c.id === selectedCategory)?.name}</strong>
+                      <br/><span className="text-xs text-gray-500">Thema wird automatisch beim Spielstart zugeteilt</span>
+                    </div>
+                  )}
+                  {!selectedCategory && (
+                    <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-500">
+                      Keine Kategorie gewählt → zufällige Kategorie beim Start
                     </div>
                   )}
                 </div>
 
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium mb-2 text-gray-700">
-                      Prompt-Zeit (Sekunden): {settings.promptTime}
-                    </label>
-                    <input
-                      type="range"
-                      min="30"
-                      max="300"
-                      step="30"
-                      value={settings.promptTime}
-                      onChange={(e) =>
-                        updateSettings({ promptTime: parseInt(e.target.value) })
-                      }
-                      className="w-full"
-                    />
+                <div className="flex gap-4">
+                  <div className="flex-1 p-3 bg-white border border-gray-200 rounded-lg text-center">
+                    <div className="text-xs text-gray-500 mb-1">⏱ Prompt-Zeit</div>
+                    <div className="text-2xl font-black text-purple-700">3:00</div>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium mb-2 text-gray-700">
-                      Voting-Zeit (Sekunden): {settings.votingTime}
-                    </label>
-                    <input
-                      type="range"
-                      min="15"
-                      max="60"
-                      step="5"
-                      value={settings.votingTime}
-                      onChange={(e) =>
-                        updateSettings({ votingTime: parseInt(e.target.value) })
-                      }
-                      className="w-full"
-                    />
+                  <div className="flex-1 p-3 bg-white border border-gray-200 rounded-lg text-center">
+                    <div className="text-xs text-gray-500 mb-1">⭐ Bewertungs-Zeit</div>
+                    <div className="text-2xl font-black text-green-700">1:30</div>
                   </div>
                 </div>
               </div>
             )}
 
-            <div className="mb-8">
-              <h2 className="text-2xl font-semibold mb-4 text-gray-800">
-                Teilnehmende ({playersList.length}/3)
+            {/* Teilnehmende */}
+            <div className="mb-6">
+              <h2 className="text-xl font-semibold mb-3 text-gray-800">
+                Mitstreiterinnen
               </h2>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="grid grid-cols-3 gap-3">
+                {/* Belegte Slots */}
                 {playersList.map((player) => (
                   <div
                     key={player.id}
-                    className="p-4 bg-gradient-to-br from-purple-100 to-pink-100 rounded-lg"
+                    className="p-4 bg-gradient-to-br from-purple-100 to-pink-100 rounded-xl text-center border-2 border-purple-200"
                   >
-                    <div className="text-lg font-semibold text-gray-800">{player.name}</div>
+                    <div className="text-2xl mb-1">⚔️</div>
+                    <div className="font-bold text-gray-800">{player.name}</div>
                     {player.id === myPlayerId && (
-                      <div className="text-sm text-purple-600 font-medium">Das bist du!</div>
+                      <div className="text-xs text-purple-600 font-medium mt-1">Das bist du!</div>
                     )}
+                  </div>
+                ))}
+                {/* Freie Slots */}
+                {Array.from({ length: Math.max(0, 3 - playersList.length) }).map((_, i) => (
+                  <div
+                    key={`empty-${i}`}
+                    className="p-4 border-2 border-dashed border-gray-300 rounded-xl text-center text-gray-400"
+                  >
+                    <div className="text-2xl mb-1">⏳</div>
+                    <div className="text-sm">Warte auf<br/>Mitspielerinnen...</div>
                   </div>
                 ))}
               </div>
             </div>
 
+            {/* Start-Bereich */}
             {role === 'player' && playersList.length >= 2 && (
-              <button
-                onClick={startGame}
-                className="w-full bg-green-600 text-white py-4 rounded-lg font-bold text-lg hover:bg-green-700 transition"
-              >
-                Spiel starten!
-              </button>
-            )}
-
-            {role === 'spectator' && (
-              <div className="text-center text-gray-600">
-                Warten auf Spielstart durch eine*n Teilnehmer*in...
+              <div className="space-y-3">
+                <button
+                  onClick={startGame}
+                  className="w-full bg-green-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-green-700 transition shadow"
+                >
+                  ▶ Spiel starten! ({playersList.length} Teilnehmende)
+                </button>
+                {playersList.length < 3 && (
+                  <p className="text-center text-sm text-gray-500">
+                    Oder noch auf eine dritte Person warten
+                  </p>
+                )}
               </div>
             )}
 
-            {playersList.length < 2 && (
-              <div className="text-center text-gray-600 mt-4">
-                Mindestens 2 Teilnehmende benötigt zum Starten
+            {role === 'player' && playersList.length < 2 && (
+              <div className="text-center py-4 text-gray-500">
+                Warte auf mindestens eine weitere Mitstreiterin...
+              </div>
+            )}
+
+            {role === 'spectator' && (
+              <div className="text-center text-gray-600 py-4">
+                Warten auf Spielstart durch eine Mitstreiterin...
               </div>
             )}
           </div>
